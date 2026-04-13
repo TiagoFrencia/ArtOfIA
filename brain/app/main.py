@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from litellm import completion
+from dual_llm_pattern import SymbolicController, QuarantineLLM
 
 
 app = FastAPI(title="AI Sandbox Brain", version="0.1.0")
@@ -93,11 +94,29 @@ async def read_terminal_output(websocket: WebSocket, sock: pysocket.socket, stop
         except OSError:
             return b""
 
+    controller = SymbolicController()
+    q_llm = QuarantineLLM(controller)
+
     while not stop_event.is_set():
         data = await loop.run_in_executor(executor, blocking_read)
         if not data:
             break
-        await websocket.send_text(data.decode("utf-8", errors="replace"))
+        
+        raw_text = data.decode("utf-8", errors="replace")
+        # Saneamiento ultra-rápido para el WS (Phase 4)
+        if len(raw_text.strip()) > 10:
+            try:
+                # El QuarantineLLM devolvería una versión resumida/saneada
+                # Nota: En alta carga esto debe pasar a un thread pool
+                sanitized = q_llm.parse_and_symbolize(raw_text)
+                if sanitized:
+                    await websocket.send_text(f"\r\n[QUARANTINE-FILTERED]: {json.dumps(sanitized)}\r\n")
+                else:
+                    await websocket.send_text(raw_text)
+            except Exception:
+                await websocket.send_text(raw_text)
+        else:
+            await websocket.send_text(raw_text)
 
 
 async def heartbeat(websocket: WebSocket, stop_event: asyncio.Event) -> None:

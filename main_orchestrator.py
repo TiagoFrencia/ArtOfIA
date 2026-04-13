@@ -31,7 +31,10 @@ async def planner_node(state: AgentState) -> dict:
 async def executor_node(state: AgentState) -> dict:
     print("[EXECUTOR] Desenlazando acciones vía MCP (Herramientas predefinidas).")
     from dual_llm_pattern import SymbolicController, QuarantineLLM, PrivilegedLLM
-    from executor import TemporalExecutor
+    
+    # MCP Client imports
+    from mcp import ClientSession
+    from mcp.client.sse import sse_client
     
     controller = SymbolicController()
     q_llm = QuarantineLLM(controller)
@@ -46,19 +49,51 @@ async def executor_node(state: AgentState) -> dict:
         
         final_args = {k: controller.resolve_payload(str(v)) for k, v in raw_args.items()}
         try:
-            print(f"[EXECUTOR] Ejecutando: {action} con {final_args}")
-            res = await temporal_exec.execute_action(action, final_args)
-            print(f"[EXECUTOR] Salida:\n{res}")
+            print(f"[EXECUTOR] Conectando a MCP Server (SSE)...")
+            async with sse_client("http://mcp-server:8000/sse") as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    
+                    print(f"[EXECUTOR] Llamando MCP Tool: {action} con {final_args}")
+                    # FastMCP tool names in main.py have underscores e.g. run_nmap
+                    mcp_tool_name = action if action.startswith("run_") or action in ["read_file", "write_exploit"] else f"run_{action}"
+                    
+                    res = await session.call_tool(mcp_tool_name, final_args)
+                    print(f"[EXECUTOR] Salida MCP:\n{res.content}")
+                    
+                    # El resultado desinfectado vuelve al contexto para la reflexión
+                    state["context_data"] += f"\n[OUTPUT {action}]: {str(res.content)}"
+                    
         except Exception as e:
-            print(f"[EXECUTOR] Fallo: {e}")
+            print(f"[EXECUTOR] Fallo en MCP o Conexión: {e}")
+            state["context_data"] += f"\n[ERROR {action}]: {str(e)}"
             
     return {"iteration_count": state.get("iteration_count", 0) + 1}
 
 async def reflector_node(state: AgentState) -> dict:
     print("[REFLECTOR] Analizando viabilidad de la iteración. (L1-L4 Attribution).")
-    # Lógica de detención tras suficientes iteraciones
-    if state.get("iteration_count", 0) >= 3:
-        return {"is_completed": True}
+    from mcp import ClientSession
+    from mcp.client.sse import sse_client
+    
+    # Criterio Empírico: ¿Existe proof.txt con la flag?
+    try:
+        async with sse_client("http://mcp-server:8000/sse") as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                res = await session.call_tool("read_file", {"path": "proof.txt"})
+                content = res.content[0].text if res.content else ""
+                
+                if "FLAG" in content.upper():
+                    print("[REFLECTOR] ✓ FLAG ENCONTRADA. Finalizando Ralph Loop.")
+                    return {"is_completed": True}
+    except Exception as e:
+        print(f"[REFLECTOR] No se pudo validar proof.txt (puede no existir aún): {e}")
+
+    # Lógica de detención tras suficientes iteraciones (Failsafe)
+    if state.get("iteration_count", 0) >= 10:
+        print("[REFLECTOR] ✗ Máximo de iteraciones alcanzado sin éxito.")
+        return {"is_completed": True, "should_halt": True}
+        
     return {"is_completed": False}
 
 def route_next_step(state: AgentState) -> Literal["executor_node", "planner_node", "__end__"]:
