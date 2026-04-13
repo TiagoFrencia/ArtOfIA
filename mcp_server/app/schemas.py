@@ -56,3 +56,32 @@ class ShellExecInput(BaseModel):
 
 class ShellExecOutput(ToolResult):
     data: dict[str, Any] = Field(default_factory=dict)
+
+
+# ── Recon: Nuclei ──────────────────────────────────────────────────
+class NucleiInput(BaseModel):
+    target: str = Field(..., description="Target URL or IP")
+    template: Optional[str] = Field(default=None, description="Optional nuclei template to use")
+
+
+class NucleiOutput(ToolResult):
+    data: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# ── File System: Read ──────────────────────────────────────────────
+class ReadFileInput(BaseModel):
+    path: str = Field(..., description="Path to the file to read within the sandbox")
+
+
+class ReadFileOutput(ToolResult):
+    data: dict[str, str] = Field(default_factory=dict)
+
+
+# ── File System: Write ─────────────────────────────────────────────
+class WriteExploitInput(BaseModel):
+    path: str = Field(..., description="Path to save the file")
+    content: str = Field(..., description="Content of the exploit/script")
+
+
+class WriteExploitOutput(ToolResult):
+    data: dict[str, str] = Field(default_factory=dict)

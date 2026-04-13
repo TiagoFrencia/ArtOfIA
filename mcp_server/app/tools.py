@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import os
+import docker
 from typing import Any
 
 from app.core.logging import get_logger
@@ -17,10 +19,76 @@ from app.schemas import (
     PortScanOutput,
     ShellExecInput,
     ShellExecOutput,
+    NucleiInput,
+    NucleiOutput,
+    ReadFileInput,
+    ReadFileOutput,
+    WriteExploitInput,
+    WriteExploitOutput,
     StatusCode,
 )
 
 log = get_logger(__name__)
+
+# Docker setup for remote execution
+DOCKER_HOST = os.getenv("DOCKER_HOST", "unix://var/run/docker.sock")
+WORKER_CONTAINER = os.getenv("WORKER_CONTAINER", "ai-worker")
+client = docker.DockerClient(base_url=DOCKER_HOST)
+
+def _run_in_worker(cmd: str | list[str]) -> str:
+    container = client.containers.get(WORKER_CONTAINER)
+    exec_id = client.api.exec_create(container.id, cmd=cmd, tty=False)["Id"]
+    output = client.api.exec_start(exec_id, detach=False)
+    return output.decode("utf-8", errors="replace").strip()
+
+
+# ── Recon Tools ──────────────────────────────────────────────────
+async def run_nmap(params: PortScanInput) -> PortScanOutput:
+    """Run nmap in the worker container."""
+    log.info("run_nmap target=%s ports=%s", params.target, params.ports)
+    cmd = f"nmap -p {params.ports} {params.target}"
+    try:
+        output = await asyncio.to_thread(_run_in_worker, ["/bin/bash", "-c", cmd])
+        return PortScanOutput(status=StatusCode.OK, data=[{"output": output}])
+    except Exception as exc:
+        return PortScanOutput(status=StatusCode.ERROR, error=str(exc))
+
+
+async def run_nuclei(params: NucleiInput) -> NucleiOutput:
+    """Run nuclei in the worker container."""
+    log.info("run_nuclei target=%s", params.target)
+    template_flag = f"-t {params.template}" if params.template else ""
+    cmd = f"nuclei -u {params.target} {template_flag} -silent"
+    try:
+        output = await asyncio.to_thread(_run_in_worker, ["/bin/bash", "-c", cmd])
+        return NucleiOutput(status=StatusCode.OK, data=[{"output": output}])
+    except Exception as exc:
+        return NucleiOutput(status=StatusCode.ERROR, error=str(exc))
+
+
+# ── File System Tools ──────────────────────────────────────────────
+async def read_file(params: ReadFileInput) -> ReadFileOutput:
+    """Read a file in the worker container."""
+    log.info("read_file path=%s", params.path)
+    cmd = f"cat {params.path}"
+    try:
+        output = await asyncio.to_thread(_run_in_worker, ["/bin/bash", "-c", cmd])
+        return ReadFileOutput(status=StatusCode.OK, data={"content": output})
+    except Exception as exc:
+        return ReadFileOutput(status=StatusCode.ERROR, error=str(exc))
+
+
+async def write_exploit(params: WriteExploitInput) -> WriteExploitOutput:
+    """Write an exploit script in the worker container."""
+    log.info("write_exploit path=%s", params.path)
+    # Using python to write to avoid shell escaping issues with complex content
+    content_escaped = params.content.replace("'", "'\\''")
+    cmd = f"printf '%s' '{content_escaped}' > {params.path}"
+    try:
+        await asyncio.to_thread(_run_in_worker, ["/bin/bash", "-c", cmd])
+        return WriteExploitOutput(status=StatusCode.OK, data={"path": params.path})
+    except Exception as exc:
+        return WriteExploitOutput(status=StatusCode.ERROR, error=str(exc))
 
 
 # ── Ping / health ──────────────────────────────────────────────────
