@@ -44,3 +44,6 @@ wheels/
 # MCP / local memory logs
 logs/
 *.log
+
+# Database
+pgdata/

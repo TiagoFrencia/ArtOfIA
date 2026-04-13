@@ -6,9 +6,24 @@ Este proyecto crea una base funcional para experimentar con agentes autonomos de
 - `brain`: servidor FastAPI con WebSocket, frontend y enrutamiento de prompts.
 - `worker`: sandbox de Kali Linux donde vive la terminal remota.
 
-## 1. Que hace esta base
+## 1. Alcance y Estado del Proyecto (Base vs Deuda Técnica)
 
-El flujo es:
+Este proyecto nace como una base ambiciosa de arquitectura P-E-R (Planner-Executor-Reflector) usando agentes duales y LangGraph. Actualmente el repositorio se encuentra en despliegue iterativo.
+
+### Implementado
+- **Aislamiento Base**: Filtros al socket de Docker (`socket-proxy`), contenedor `worker` (Kali) aislado y `brain` como orquestador / WebSocket server.
+- **Workflow P-E-R Conceptual**: Nodos base mapeados en `main_orchestrator.py` utilizando NetworkX/LangGraph.
+- **Dual-LLM Pattern Conceptual**: Separación en `dual_llm_pattern.py` entre LLM Cuarentena y Privilegiado.
+
+### Deuda Técnica Parcial (Backlog Actual)
+- **Desconexión entre módulos**: El `brain` y el Loop de LangGraph no están integrados en su `/route`.
+- **Nodos Vacíos**: Los nodos L1 a L4 y el executor de LangGraph actualmente son stubs con mockeo.
+- **Déficit de Persistencia**: Aún no cuenta con la conexión real a `pgvector` que indica la fase de arquitectura (reemplazada por archivos TXT temporales momentáneamente).
+- **Cobertura de Pruebas**: Ausencia de tests estructurados para validación XBOW.
+
+## 2. Flujo Básico Actual
+
+El flujo de conexión interactiva:
 
 1. El navegador se conecta al servicio `brain`.
 2. `brain` abre una shell interactiva dentro del contenedor `worker`.
