@@ -39,26 +39,38 @@ class Reflector:
     """
     
     def analyze_failure_attribution(self, result: ExecutionResult) -> Optional[FailureLevel]:
-        """Clasificación de errores basada en patrones L1-L4."""
+        """Clasificación de errores usando LLM para inferir L1-L4."""
         if result.success:
             return None
             
         err = (result.error_msg or "").lower()
         output = (result.output or "").lower()
         
-        # L3: Environment Block (WAF, IPS, Firewall Drops)
+        try:
+            from litellm import completion
+            import os
+            
+            prompt = f"Analyze this error: Msg: {err}\nOutput: {output}\nClassify into EXACTLY ONE of: L1_TOOL_ERROR, L2_INVALID_HYPOTHESIS, L3_ENVIRONMENT_BLOCK, L4_DEAD_END. Only return the string."
+            model = os.getenv("CLOUD_MODEL", "gemini/gemini-2.5-flash")
+            api_key = os.getenv("GEMINI_API_KEY", "")
+            
+            if api_key:
+                resp = completion(model=model, messages=[{"role": "user", "content": prompt}], api_key=api_key)
+                ans = resp.choices[0].message.content.strip()
+                if "L3_ENVIRONMENT_BLOCK" in ans: return FailureLevel.L3_ENVIRONMENT_BLOCK
+                if "L1_TOOL_ERROR" in ans: return FailureLevel.L1_TOOL_ERROR
+                if "L2_INVALID_HYPOTHESIS" in ans: return FailureLevel.L2_INVALID_HYPOTHESIS
+        except Exception as e:
+            print(f"[Reflector] LLM attribution failed, fallback to heuristics: {e}")
+            
+        # Fallback heuristic
         if any(kw in err or kw in output for kw in ["403 forbidden", "waf", "connection reset", "blocked", "captcha"]):
             return FailureLevel.L3_ENVIRONMENT_BLOCK
-            
-        # L1: Tool Error (Syntax, Timeouts, Missing Binaries)
         if any(kw in err or kw in output for kw in ["syntax error", "not found", "timeout limit", "validation error", "unrecognized argument"]):
             return FailureLevel.L1_TOOL_ERROR
-            
-        # L2: Invalid Hypothesis (Service not matching expected exploit context)
         if any(kw in err or kw in output for kw in ["not vulnerable", "version mismatch", "0 hosts up", "access denied"]):
             return FailureLevel.L2_INVALID_HYPOTHESIS
             
-        # L4: Default Fallback para fallos abstractos estructurales
         return FailureLevel.L4_DEAD_END
 
     def detect_rabbit_hole(self, state: TaskState) -> Tuple[bool, str]:

@@ -8,10 +8,23 @@ from pydantic import BaseModel, Field, ConfigDict, ValidationError
 
 # Intentamos importar la función del proyecto, o usamos un mock local
 try:
-    from react_agent import call_llm_api
+    from litellm import completion
+    import os
+    
+    def call_llm_api(prompt: str) -> str:
+        model = os.getenv("CLOUD_MODEL", "gemini/gemini-2.5-flash")
+        api_key = os.getenv("GEMINI_API_KEY", "")
+        if not api_key:
+            return '{"horizon_estimation": 0.4, "evidence_confidence": 0.8, "context_load": 0.3, "historical_success": 0.6}'
+        print(f"[Planner] Llamando al modelo real: {model}")
+        response = completion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            api_key=api_key
+        )
+        return response.choices[0].message.content
 except ImportError:
     def call_llm_api(prompt: str) -> str:
-        # Fallback mock for LLM returning JSON
         return '{"horizon_estimation": 0.4, "evidence_confidence": 0.8, "context_load": 0.3, "historical_success": 0.6}'
 
 

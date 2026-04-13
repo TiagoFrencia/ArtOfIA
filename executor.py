@@ -4,6 +4,18 @@ from pydantic import BaseModel, Field, ValidationError
 from temporalio import activity
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
+import docker
+import os
+
+docker_client = docker.DockerClient(base_url=os.getenv("DOCKER_HOST", "unix://var/run/docker.sock"))
+docker_api = docker.APIClient(base_url=os.getenv("DOCKER_HOST", "unix://var/run/docker.sock"))
+WORKER_CONTAINER = os.getenv("WORKER_CONTAINER", "ai-worker")
+
+def run_in_worker(cmd_str: str) -> str:
+    container = docker_client.containers.get(WORKER_CONTAINER)
+    exec_id = docker_api.exec_create(container.id, cmd=cmd_str, tty=False)["Id"]
+    output = docker_api.exec_start(exec_id, detach=False)
+    return output.decode("utf-8", errors="replace").strip()
 
 # ---------------------------------------------------------
 # OPEN TELEMETRY TRACER
@@ -52,11 +64,14 @@ async def run_nmap(params: NmapParams) -> str:
         span.set_attribute("target", params.target_ip)
         span.set_attribute("ports", params.ports)
         
-        # En producción, se invoca vía subprocess de red sin shell=True.
-        # Aquí solo simulamos el resultado seguro.
-        result = f"Obtained open ports on {params.target_ip}: {params.ports}"
-        span.add_event("Scan completed")
-        return result
+        # Ejecuta remotamente en el contenedor worker
+        cmd = f"nmap -p {params.ports} {params.target_ip}"
+        span.add_event(f"Executing: {cmd}")
+        try:
+            result = run_in_worker(["/bin/bash", "-c", cmd])
+            return result or "Nmap scan completed with no output."
+        except Exception as e:
+            return f"[ERROR] Failed to run nmap: {e}"
 
 @activity.defn
 async def fetch_http(params: HttpParams) -> str:
@@ -65,8 +80,13 @@ async def fetch_http(params: HttpParams) -> str:
         span.set_attribute("endpoint", params.endpoint)
         span.set_attribute("method", params.method)
         
-        # En producción usar httpx AsyncClient
-        return f"{params.method} success against {params.endpoint}"
+        cmd = f"curl -s -X {params.method} {params.endpoint}"
+        span.add_event(f"Executing: {cmd}")
+        try:
+            result = run_in_worker(["/bin/bash", "-c", cmd])
+            return result or f"{params.method} completed with no output."
+        except Exception as e:
+            return f"[ERROR] Failed to run curl: {e}"
 
 # ---------------------------------------------------------
 # TOOL REGISTRY
