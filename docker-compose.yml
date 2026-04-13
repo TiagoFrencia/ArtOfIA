@@ -23,7 +23,8 @@ services:
 
   brain:
     build:
-      context: ./brain
+      context: .
+      dockerfile: brain/Dockerfile
     container_name: ai-brain
     restart: unless-stopped
     environment:

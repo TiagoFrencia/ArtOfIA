@@ -29,6 +29,28 @@ async def planner_node(state: AgentState) -> dict:
 
 async def executor_node(state: AgentState) -> dict:
     print("[EXECUTOR] Desenlazando acciones vía MCP (Herramientas predefinidas).")
+    from dual_llm_pattern import SymbolicController, QuarantineLLM, PrivilegedLLM
+    from executor import TemporalExecutor
+    
+    controller = SymbolicController()
+    q_llm = QuarantineLLM(controller)
+    p_llm = PrivilegedLLM(controller)
+    temporal_exec = TemporalExecutor()
+    
+    safe_context = q_llm.parse_and_symbolize(state.get("context_data", ""))
+    if safe_context:
+        decision = p_llm.decide_action(safe_context)
+        action = decision.get("action", "")
+        raw_args = decision.get("mcp_arguments", {})
+        
+        final_args = {k: controller.resolve_payload(str(v)) for k, v in raw_args.items()}
+        try:
+            print(f"[EXECUTOR] Ejecutando: {action} con {final_args}")
+            res = await temporal_exec.execute_action(action, final_args)
+            print(f"[EXECUTOR] Salida:\n{res}")
+        except Exception as e:
+            print(f"[EXECUTOR] Fallo: {e}")
+            
     return {"iteration_count": state.get("iteration_count", 0) + 1}
 
 async def reflector_node(state: AgentState) -> dict:

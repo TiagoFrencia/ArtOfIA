@@ -188,16 +188,19 @@ async def route_prompt(payload: dict) -> JSONResponse:
 
     if task == "plan_next_command":
         try:
-            response = await asyncio.to_thread(call_cloud_model, content)
+            from main_orchestrator import RalphLoopOrchestrator
+            orch = RalphLoopOrchestrator()
+            
+            # Lanzamos en thread o background task porque execute_task corre P-E-R loop
+            asyncio.create_task(orch.execute_task(content))
+            response = "Workflow de Orchestrator (Ralph Loop) iniciado. El agente operará automáticamente basándose en este prompt."
+            
         except Exception as exc:
             raise HTTPException(
                 status_code=502,
-                detail=(
-                    "Fallo la ruta de nube. "
-                    f"Modelo configurado: '{CLOUD_MODEL}'. Verifica tu GEMINI_API_KEY. Error: {exc}"
-                ),
+                detail=f"Fallo al iniciar LangGraph/RalphLoopOrchestrator. Error: {exc}",
             ) from exc
-        return JSONResponse({"route": "cloud", "model": CLOUD_MODEL, "response": response})
+        return JSONResponse({"route": "orchestrator", "response": response})
 
     raise HTTPException(status_code=400, detail=f"Tarea desconocida: {task}")
 
