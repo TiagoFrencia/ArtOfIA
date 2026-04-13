@@ -41,6 +41,9 @@ services:
       PGDATABASE: art_of_ia
       PGUSER: postgres
       PGPASSWORD: secretpassword
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: secretpassword
       LITELLM_LOG: INFO
     ports:
       - "8000:8000"
@@ -81,6 +84,45 @@ services:
     networks:
       - control_net
 
+  neo4j:
+    image: neo4j:5.12
+    container_name: ai-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/secretpassword
+      NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - control_net
+
+  # ── BENCHMARK TARGETS (Phase 5) ──────────────────────────────────
+  target-dvwa:
+    image: vulfocus/dvwa
+    container_name: target-dvwa
+    restart: unless-stopped
+    networks:
+      - sandbox_net
+
+  target-struts2:
+    image: vulfocus/struts2-cve_2017_5638
+    container_name: target-struts2
+    restart: unless-stopped
+    networks:
+      - sandbox_net
+
+  target-lfi:
+    image: nginx:alpine
+    container_name: target-lfi
+    restart: unless-stopped
+    volumes:
+      - ./tests/lfi_fakes:/usr/share/nginx/html/data
+    networks:
+      - sandbox_net
+
 networks:
   control_net:
     driver: bridge
@@ -90,3 +132,4 @@ networks:
 
 volumes:
   pgdata:
+  neo4j_data:
