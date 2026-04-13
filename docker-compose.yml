@@ -36,6 +36,11 @@ services:
       CLOUD_MODEL: ${CLOUD_MODEL:-gemini/gemini-2.5-flash}
       OLLAMA_API_BASE: ${OLLAMA_API_BASE:-http://host.docker.internal:11434}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      PGHOST: db
+      PGPORT: 5432
+      PGDATABASE: art_of_ia
+      PGUSER: postgres
+      PGPASSWORD: secretpassword
       LITELLM_LOG: INFO
     ports:
       - "8000:8000"
@@ -62,9 +67,26 @@ services:
     networks:
       - sandbox_net
 
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: ai-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: art_of_ia
+      POSTGRES_PASSWORD: secretpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - control_net
+
 networks:
   control_net:
     driver: bridge
   sandbox_net:
     driver: bridge
     internal: true
+
+volumes:
+  pgdata:

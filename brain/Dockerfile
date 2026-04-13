@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 COPY brain/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt langgraph networkx pydantic hvac temporalio litellm opentelemetry-api
+RUN pip install --no-cache-dir -r requirements.txt langgraph networkx pydantic hvac temporalio litellm opentelemetry-api psycopg2-binary pgvector
 
 COPY brain/app ./app
 COPY *.py ./

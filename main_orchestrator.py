@@ -4,6 +4,7 @@ import asyncio
 import uuid
 from typing import TypedDict, List, Dict, Any, Literal
 from langgraph.graph import StateGraph, START, END
+from semantic_memory import SemanticMemory
 
 # Simula la librería real: from langfuse.callback import CallbackHandler
 class MockLangfuseCallbackHandler:
@@ -111,8 +112,8 @@ class RalphLoopOrchestrator:
         self.graph = self._compile_graph()
         
         # Configuración asíncrona de trazabilidad Langfuse para Observabilidad
-        # En prod: self.langfuse_handler = CallbackHandler(public_key="...", secret_key="...", host="...")
         self.langfuse_handler = MockLangfuseCallbackHandler("pk_live_...", "sk_live_...", "https://cloud.langfuse.com")
+        self.semantic_memory = SemanticMemory()
         
     def _compile_graph(self):
         builder = StateGraph(AgentState)
@@ -173,7 +174,19 @@ class RalphLoopOrchestrator:
                 
                 # 4. Inmediatamente externalizar al disco.
                 self.state_manager.write_state(evolved_state)
-                print(">>> [RALPH LOOP] Estado consolidado a progreso.txt e IMPLEMENTATION_PLAN.md. Memoria destruída.\n")
+                
+                # 5. Guardar en Memoria Semántica para persistencia a largo plazo (Fase 4)
+                print(">>> [RALPH LOOP] Indexando estado en memoria semántica...")
+                self.semantic_memory.add_memory(
+                    content=f"Iteración {evolved_state['iteration_count']}: {evolved_state['context_data']}",
+                    metadata={
+                        "run_id": run_id,
+                        "iteration": evolved_state['iteration_count'],
+                        "plan": evolved_state['plan']
+                    }
+                )
+                
+                print(">>> [RALPH LOOP] Estado consolidado a progreso.txt y DB. Memoria RAM destruída.\n")
                 
             except Exception as e:
                 print(f"[ERROR CRÍTICO FATAL] La iteración del LangGraph falló: {e}")
