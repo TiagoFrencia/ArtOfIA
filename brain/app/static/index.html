@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Sandbox Console</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <section class="panel">
+        <div class="panel__header">
+          <div>
+            <p class="eyebrow">Arquitectura Base</p>
+            <h1>Terminal remota del sandbox</h1>
+          </div>
+          <button id="reconnectButton" class="button">Reconectar</button>
+        </div>
+
+        <p class="panel__copy">
+          Esta consola vive en el contenedor aislado. Todo lo que escribas se
+          ejecuta dentro del worker y no en tu maquina anfitriona.
+        </p>
+
+        <div id="status" class="status">Conectando...</div>
+        <div id="terminal"></div>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

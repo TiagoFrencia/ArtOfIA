@@ -1,0 +1,127 @@
+:root {
+  color-scheme: dark;
+  --bg: #020817;
+  --panel: rgba(9, 18, 33, 0.86);
+  --border: rgba(113, 196, 255, 0.22);
+  --text: #dbe7ff;
+  --muted: #9fb3d9;
+  --accent: #8cf2d6;
+  --danger: #ff6b81;
+  --warn: #ffd166;
+  --ok: #8cf2d6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Segoe UI", sans-serif;
+  background:
+    radial-gradient(circle at top, rgba(101, 181, 255, 0.15), transparent 30%),
+    linear-gradient(180deg, #020817 0%, #071224 100%);
+  color: var(--text);
+}
+
+.layout {
+  width: min(1200px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 32px 0;
+}
+
+.panel {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 24px;
+  padding: 24px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(16px);
+}
+
+.panel__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: start;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(28px, 4vw, 42px);
+}
+
+.panel__copy {
+  color: var(--muted);
+  max-width: 72ch;
+}
+
+.button {
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #65b5ff, #8cf2d6);
+  color: #06101c;
+  padding: 12px 18px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.status {
+  margin: 16px 0;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+}
+
+.status[data-variant="ok"] {
+  color: var(--ok);
+}
+
+.status[data-variant="warn"] {
+  color: var(--warn);
+}
+
+.status[data-variant="error"] {
+  color: var(--danger);
+}
+
+#terminal {
+  min-height: 70vh;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.xterm {
+  padding: 18px;
+}
+
+@media (max-width: 720px) {
+  .layout {
+    width: calc(100vw - 20px);
+    padding: 10px 0;
+  }
+
+  .panel {
+    padding: 16px;
+    border-radius: 18px;
+  }
+
+  .panel__header {
+    flex-direction: column;
+  }
+
+  #terminal {
+    min-height: 60vh;
+  }
+}

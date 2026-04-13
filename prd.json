@@ -1,0 +1,17 @@
+{
+  "mission": "Realizar un reconocimiento completo de la máquina local: obtener hostname, usuario actual, interfaces de red, puertos abiertos, y procesos activos. Guardar toda la evidencia recopilada en el archivo proof.txt.",
+  "required_proofs": [
+    "proof.txt"
+  ],
+  "proof_validators": {
+    "proof.txt": {
+      "must_exist": true,
+      "min_bytes": 50,
+      "must_contain": ["hostname", "interfaces"]
+    }
+  },
+  "promise_tag": "<promise>COMPLETE</promise>",
+  "max_ralph_retries": 10,
+  "agent_max_iterations": 8,
+  "agent_timeout_seconds": 15
+}
