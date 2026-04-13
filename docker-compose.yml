@@ -50,6 +50,21 @@ services:
     depends_on:
       - socket-proxy
       - worker
+      - mcp-server
+    networks:
+      - control_net
+
+  mcp-server:
+    build:
+      context: ./mcp_server
+    container_name: ai-mcp-server
+    restart: unless-stopped
+    environment:
+      DOCKER_HOST: tcp://socket-proxy:2375
+      WORKER_CONTAINER: ai-worker
+      TRANSPORT_MODE: sse
+    depends_on:
+      - socket-proxy
     networks:
       - control_net
 
