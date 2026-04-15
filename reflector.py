@@ -11,14 +11,25 @@ logger = logging.getLogger("ArtOfIA-Reflector")
 
 class Reflector:
     """
-    Nodo Reflector Heurístico (Beast Mode 2.0).
+    Nodo Reflector Heurístico (Beast Mode 4.0 - Hardening).
     Capaz de analizar:
     1. Respuestas HTTP (Análisis Estructural, $\Delta t$, Longitud).
     2. Salidas de Herramientas (Análisis de Patrones de Consola/Stdout).
+    3. Análisis de Firmas WAF (Identificación de 'Sabor de Bloqueo' para feedback de L2).
     """
     def __init__(self, target_url: str):
         self.target_url = target_url
         self.network_baseline_ms = 0.0 
+        
+        # Firmas comunes de WAFs para alimentar la estrategia polimórfica
+        self.waf_signatures = {
+            "Cloudflare": [r"cloudflare", r"cf-ray", r"ray id"],
+            "Akamai": [r"akamai", r"edgecast"],
+            "ModSecurity": [r"mod_security", r"modsecurity"],
+            "AWS WAF": [r"aws-waf", r"x-amz-waf"],
+            "Imperva": [r"incapsula", r"imperva"],
+            "Generic_WAF": [r"web application firewall", r"access denied", r"forbidden"]
+        }
 
     def _simplify_dom(self, html_content: str) -> str:
         """
@@ -52,10 +63,33 @@ class Reflector:
             pass
         return (time.perf_counter() - start) * 1000
 
+    def _identify_waf_flavor(self, response: httpx.Response) -> str:
+        """
+        HARDENING FASE 4: Identifica la firma del bloqueo.
+        Esto permite que el PrivilegedLLM elija la codificación polimórfica correcta.
+        """
+        # 1. Analizar Headers
+        headers_str = str(response.headers).lower()
+        # 2. Analizar Body
+        body_str = response.text.lower()
+        
+        combined_text = headers_str + " " + body_str
+        
+        for waf, patterns in self.waf_signatures.items():
+            for pattern in patterns:
+                if re.search(pattern, combined_text, re.IGNORECASE):
+                    return waf
+        
+        # Fallback basado en código de estado
+        if response.status_code == 403: return "WAF_FORBIDDEN"
+        if response.status_code == 406: return "WAF_NOT_ACCEPTABLE"
+        if response.status_code == 429: return "WAF_RATE_LIMIT"
+        
+        return "UNKNOWN_BLOCK"
+
     def _analyze_tool_output(self, tool_name: str, output: str) -> Optional[Dict[str, Any]]:
         """
         Analizador de patrones para herramientas profesionales.
-        Busca indicadores de éxito en el stdout de la herramienta.
         """
         patterns = {
             "sqlmap": [r"payload:.*", r"database:.*", r"table:.*", r"column:.*", r"fetched.*records"],
@@ -78,8 +112,8 @@ class Reflector:
 
     async def execute(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Orquestador de Reflejo.
-        Decide si analizar un HTTP Response (Sniper) o un Tool Output (Arsenal).
+        Orquestador de Reflejo (Phase 4).
+        Decide si analizar un HTTP Response o un Tool Output.
         """
         # --- ESCENARIO A: Análisis de salida de Herramienta (ToolExecutor) ---
         if state.get("last_action") == "RUN_TOOL":
@@ -102,11 +136,11 @@ class Reflector:
             print(f"[-] Reflector: {tool_name} no encontró resultados concluyentes.")
             return {"status": "failed", "last_response_metadata": {"type": "tool_no_match"}}
 
-        # --- ESCENARIO B: Análisis de Respuesta HTTP (Sniper) ---
+        # --- ESCENARIO B: Análisis de Respuesta HTTP (Sniper / PolyBridge) ---
         payload = state.get("current_payload", "")
         vuln_type = state.get("vuln_type", "SQLI")
         
-        # Resolución de URL (En integración real, esto viene del SymbolicController)
+        # Resolución de URL (Se asume que el orquestador pasa la URL final)
         url = state.get("resolved_url", f"{self.target_url}?q={payload}") 
         
         if self.network_baseline_ms == 0:
@@ -114,7 +148,7 @@ class Reflector:
 
         start_time = time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
                 response = await client.get(url)
         except Exception as e:
             logger.error(f"Reflector Request Error: {e}")
@@ -168,19 +202,21 @@ class Reflector:
                 }
             }
 
-        # 4. ANÁLISIS DE BLOQUEO WAF
-        if response.status_code in [403, 406, 429]:
-            print(f"[!] Reflector: Bloqueo detectado (HTTP {response.status_code}).")
+        # 4. ANÁLISIS DE BLOQUEO WAF (HARDENING FASE 4)
+        if response.status_code in [403, 406, 429] or "access denied" in content.lower():
+            waf_flavor = self._identify_waf_flavor(response)
+            print(f"[!] Reflector: Bloqueo detectado. Sabor WAF: {waf_flavor} (HTTP {response.status_code}).")
             return {
                 "status": "blocked",
                 "last_response_metadata": {
                     "status_code": response.status_code,
+                    "block_type": waf_flavor, # Información crítica para el PrivilegedLLM
                     "length": length,
                     "simplified_content": simplified_content
                 }
             }
         
-        print(f"[-] Reflector: Intento fallido.")
+        print(f"[-] Reflector: Intento fallido (Sin evidencia de éxito ni bloqueo claro).")
         return {
             "status": "failed",
             "last_response_metadata": {

