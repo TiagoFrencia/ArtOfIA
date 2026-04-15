@@ -1,146 +1,83 @@
-from typing import List, Dict, Any, Optional, Tuple
-from enum import Enum
-from pydantic import BaseModel, Field
+import time
+import httpx
+from difflib import SequenceMatcher
+from typing import Dict, Any
+from langgraph.graph import END
 
-# ---------------------------------------------------------
-# DOMAIN MODELS
-# ---------------------------------------------------------
-class FailureLevel(str, Enum):
-    L1_TOOL_ERROR = "L1_TOOL_ERROR"
-    L2_INVALID_HYPOTHESIS = "L2_INVALID_HYPOTHESIS"
-    L3_ENVIRONMENT_BLOCK = "L3_ENVIRONMENT_BLOCK"
-    L4_DEAD_END = "L4_DEAD_END"
-
-class ExecutionResult(BaseModel):
-    action_id: str
-    action_name: str
-    success: bool
-    output: str
-    error_msg: Optional[str] = None
-
-class TaskState(BaseModel):
-    """Representación inmutable del estado actual para el análisis del reflector."""
-    tool_calls: int = 0
-    current_cost: float = 0.0
-    evidence_fingerprints: List[str] = Field(default_factory=list) # Track evidence evolution
-    recent_results: List[ExecutionResult] = Field(default_factory=list)
-    max_tool_calls: int = 40
-    max_cost: float = 0.30
-    rabbit_hole_threshold: int = 4  # N steps sin nueva evidencia
-
-# ---------------------------------------------------------
-# REFLECTOR COMPONENT
-# ---------------------------------------------------------
 class Reflector:
-    """
-    Componente Reflector (R) para la arquitectura P-E-R.
-    Responsable de Failure Attribution, Detección de Bucles e Intervención Temprana.
-    Objetivo Económico: Costo medio de éxito < $0.09.
-    """
-    
-    def analyze_failure_attribution(self, result: ExecutionResult) -> Optional[FailureLevel]:
-        """Clasificación de errores usando LLM para inferir L1-L4."""
-        if result.success:
-            return None
-            
-        err = (result.error_msg or "").lower()
-        output = (result.output or "").lower()
+    def __init__(self, target_url: str):
+        self.target_url = target_url
+
+    async def execute(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Nodo Reflector Heurístico. 
+        Detecta éxitos mediante Tiempo, Longitud y Diferencial de contenido.
+        """
+        payload = state.get("current_payload", "")
         
+        # Preparar la solicitud
+        # Nota: Ajusta esto según cómo pases los payloads (Query param, Body, etc.)
+        url = f"{self.target_url}?payload={payload}" # Ejemplo simple
+        
+        start_time = time.time()
         try:
-            from litellm import completion
-            import os
-            
-            prompt = f"Analyze this error: Msg: {err}\nOutput: {output}\nClassify into EXACTLY ONE of: L1_TOOL_ERROR, L2_INVALID_HYPOTHESIS, L3_ENVIRONMENT_BLOCK, L4_DEAD_END. Only return the string."
-            model = os.getenv("CLOUD_MODEL", "gemini/gemini-2.5-flash")
-            api_key = os.getenv("GEMINI_API_KEY", "")
-            
-            if api_key:
-                resp = completion(model=model, messages=[{"role": "user", "content": prompt}], api_key=api_key)
-                ans = resp.choices[0].message.content.strip()
-                if "L3_ENVIRONMENT_BLOCK" in ans: return FailureLevel.L3_ENVIRONMENT_BLOCK
-                if "L1_TOOL_ERROR" in ans: return FailureLevel.L1_TOOL_ERROR
-                if "L2_INVALID_HYPOTHESIS" in ans: return FailureLevel.L2_INVALID_HYPOTHESIS
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url)
         except Exception as e:
-            print(f"[Reflector] LLM attribution failed, fallback to heuristics: {e}")
-            
-        # Fallback heuristic
-        if any(kw in err or kw in output for kw in ["403 forbidden", "waf", "connection reset", "blocked", "captcha"]):
-            return FailureLevel.L3_ENVIRONMENT_BLOCK
-        if any(kw in err or kw in output for kw in ["syntax error", "not found", "timeout limit", "validation error", "unrecognized argument"]):
-            return FailureLevel.L1_TOOL_ERROR
-        if any(kw in err or kw in output for kw in ["not vulnerable", "version mismatch", "0 hosts up", "access denied"]):
-            return FailureLevel.L2_INVALID_HYPOTHESIS
-            
-        return FailureLevel.L4_DEAD_END
-
-    def detect_rabbit_hole(self, state: TaskState) -> Tuple[bool, str]:
-        """
-        Detecta si el agente entró en una madriguera (Loop infinito cognitivo).
-        Regla: Sin nueva evidencia durante los últimos N pasos.
-        """
-        if len(state.evidence_fingerprints) < state.rabbit_hole_threshold:
-            return False, ""
-            
-        # Revisamos los últimos N pasos
-        recent_evidence = state.evidence_fingerprints[-state.rabbit_hole_threshold:]
+            print(f"[-] Error de red en Reflector: {e}")
+            return {"status": "failed", "error": str(e)}
         
-        # Si la huella de evidencia no cambió en N pasos, estamos atrapados
-        if len(set(recent_evidence)) == 1:
-            return True, f"Agente atrapado: La evidencia no ha mutado en los últimos {state.rabbit_hole_threshold} pasos consecutivos."
-            
-        return False, ""
+        end_time = time.time()
+        
+        duration = end_time - start_time
+        content = response.text
+        length = len(content)
+        
+        print(f"[*] Reflector: Respuesta recibida ({length} bytes) en {duration:.2f}s")
 
-    def should_halt(self, state: TaskState) -> Tuple[bool, str]:
-        """
-        Calcula las reglas de Early Stopping limitadas por hardware.
-        """
-        # Hardcoded Economic & Tool Rules
-        if state.tool_calls >= state.max_tool_calls:
-            return self.halt_task(f"Límite máximo de tool calls alcanzado ({state.tool_calls}/{state.max_tool_calls}).")
-            
-        if state.current_cost >= state.max_cost:
-            return self.halt_task(f"Límite de presupuesto excedido (${state.current_cost:.2f}/${state.max_cost:.2f}).")
-            
-        # Detección Algorítmica de Rabbit Holes
-        is_stuck, reason = self.detect_rabbit_hole(state)
-        if is_stuck:
-            return self.halt_task(reason)
-            
-        return False, "Operación dentro de umbrales aceptables."
+        # --- LÓGICA HEURÍSTICA ---
 
-    def halt_task(self, reason: str) -> Tuple[bool, str]:
-        """Señal formal para finalizar el Workflow de Temporal."""
-        print(f"\n[REFLECTOR HALT SIGNAL ACTIVADA]\nMotivo: {reason}\nIniciando terminación limpia de la tarea...")
-        return True, reason
+        # 1. DETECCIÓN TEMPORAL (Time-based Blind)
+        # Si el payload incluye un SLEEP y la respuesta tarda > 4s, es éxito.
+        if duration > 4.0:
+            print(f"[+] ¡ÉXITO HEURÍSTICO! Respuesta lenta detectada ({duration:.2f}s).")
+            return {
+                "status": "success", 
+                "last_response_metadata": {"type": "time_based", "duration": duration}
+            }
 
-# ---------------------------------------------------------
-# DEMONSTRATION
-# ---------------------------------------------------------
-if __name__ == "__main__":
-    reflector = Reflector()
-    
-    # Simulación de Estado Abortivo Económico
-    print("--- Test 1: Prevención Económica ---")
-    state_expensive = TaskState(tool_calls=15, current_cost=0.35)
-    halt, reason = reflector.should_halt(state_expensive)
-    print(f"Halt: {halt} | Reason: {reason}\n")
-    
-    # Simulación de Rabbit Hole
-    print("--- Test 2: Rabbit Hole Analysis ---")
-    stuck_state = TaskState(
-        tool_calls=12,
-        current_cost=0.08,
-        # Misma huella criptográfica ("hash_evidence") 4 veces seguidas
-        evidence_fingerprints=["hash_A", "hash_B", "hash_C", "hash_C", "hash_C", "hash_C"] 
-    )
-    halt, reason = reflector.should_halt(stuck_state)
-    print(f"Halt: {halt} | Reason: {reason}\n")
-    
-    # Simulación de Failure Attribution
-    print("--- Test 3: L1-L4 Failure Attribution ---")
-    res_l3 = ExecutionResult(
-        action_id="sql_inject", action_name="send_payload", success=False, 
-        output="Cloudflare captcha detected, 403 Forbidden.", error_msg=""
-    )
-    failure_type = reflector.analyze_failure_attribution(res_l3)
-    print(f"Resultado clasificado como: {failure_type.value}")
+        # 2. DETECCIÓN POR DIFERENCIAL DE LONGITUD (Length-based Blind)
+        # Obtenemos la longitud de la última respuesta guardada en el estado
+        metadata = state.get("last_response_metadata", {})
+        prev_length = metadata.get("length")
+        
+        if prev_length and abs(length - prev_length) > 20: 
+            print(f"[+] ¡ÉXITO HEURÍSTICO! Cambio de longitud detectado ({prev_length} -> {length}).")
+            return {
+                "status": "success", 
+                "last_response_metadata": {"type": "length_based", "length": length}
+            }
+
+        # 3. DETECCIÓN POR SIMILITUD (Content Diffing)
+        prev_content = metadata.get("last_content")
+        if prev_content:
+            ratio = SequenceMatcher(None, content, prev_content).ratio()
+            if ratio < 0.8: # Si el contenido cambia más del 20%
+                print(f"[+] ¡ÉXITO HEURÍSTICO! Contenido mutado drásticamente (Ratio: {ratio:.2f}).")
+                return {
+                    "status": "success", 
+                    "last_response_metadata": {"type": "diff_based", "ratio": ratio}
+                }
+
+        # --- RESULTADO FINAL ---
+        # Si no hubo éxito heurístico, determinamos si fue bloqueo o fallo simple
+        status = "blocked" if response.status_code in [403, 406, 429] else "failed"
+        
+        return {
+            "status": status,
+            "last_response_metadata": {
+                "length": length, 
+                "last_content": content
+            },
+            "failed_attempts_summary": state.get("failed_attempts_summary", []) + [{"payload": payload}]
+        }
