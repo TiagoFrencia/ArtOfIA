@@ -1,4 +1,5 @@
 services:
+  # ── CONTROL LAYER (SNC) ──────────────────────────────────
   socket-proxy:
     image: tecnativa/docker-socket-proxy:0.1.1
     container_name: ai-socket-proxy
@@ -79,15 +80,23 @@ services:
     networks:
       - control_net
 
+  # ── ATTACK BOX (The Beast's Hands) ────────────────────────
   worker:
     build:
       context: ./worker
     container_name: ai-worker
     restart: unless-stopped
-    cap_drop:
-      - ALL
+    # --- CAMBIO CRÍTICO: MODO PRIVILEGIADO ---
+    privileged: true 
+    dns: 8.8.8.8
+    # -----------------------------------------
+    # Mantenemos esto por compatibilidad, aunque privileged ya lo incluye todo
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     security_opt:
-      - no-new-privileges:true
+      - seccomp:unconfined
+    # ------------------------------------------
     tmpfs:
       - /tmp
     mem_limit: 4g
@@ -96,6 +105,7 @@ services:
     networks:
       - sandbox_net
 
+  # ── PERSISTENCE LAYER ─────────────────────────────────────
   db:
     image: pgvector/pgvector:pg16
     container_name: ai-db
@@ -125,7 +135,7 @@ services:
     networks:
       - control_net
 
-  # ── BENCHMARK TARGETS (Phase 5) ──────────────────────────────────
+  # ── BENCHMARK TARGETS (The Victims) ───────────────────────
   target-dvwa:
     image: vulfocus/dvwa
     container_name: target-dvwa
@@ -167,7 +177,7 @@ networks:
     driver: bridge
   sandbox_net:
     driver: bridge
-    internal: true
+  
 
 volumes:
   pgdata:
