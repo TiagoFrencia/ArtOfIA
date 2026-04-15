@@ -3,3 +3,5 @@ fastapi==0.116.1
 litellm==1.76.0
 uvicorn[standard]==0.35.0
 websockets==15.0.1
+sentence-transformers
+torch

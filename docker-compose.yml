@@ -31,11 +31,10 @@ services:
       DOCKER_HOST: tcp://socket-proxy:2375
       WORKER_CONTAINER: ai-worker
       HEARTBEAT_SECONDS: ${HEARTBEAT_SECONDS:-25}
-      LOCAL_MODEL: ${LOCAL_MODEL:-ollama/gemma4:26b}
-      LOCAL_FALLBACK_MODEL: ${LOCAL_FALLBACK_MODEL:-ollama/gemma3:12b}
-      CLOUD_MODEL: ${CLOUD_MODEL:-gemini/gemini-2.5-flash}
+      LOCAL_QUARANTINE_MODEL: ${LOCAL_QUARANTINE_MODEL:-ollama/qwen3.5:9b}
+      LOCAL_PRIVILEGED_MODEL: ${LOCAL_PRIVILEGED_MODEL:-ollama/qwen2.5-coder:14b}
       OLLAMA_API_BASE: ${OLLAMA_API_BASE:-http://host.docker.internal:11434}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
       PGHOST: db
       PGPORT: 5432
       PGDATABASE: art_of_ia
@@ -47,6 +46,15 @@ services:
       LITELLM_LOG: INFO
     ports:
       - "8000:8000"
+    volumes:
+      - ./brain/app:/app/app
+      - ./planner.py:/app/planner.py
+      - ./main_orchestrator.py:/app/main_orchestrator.py
+      - ./dual_llm_pattern.py:/app/dual_llm_pattern.py
+      - ./semantic_memory.py:/app/semantic_memory.py
+      - ./benchmark_runner.py:/app/benchmark_runner.py
+      - ./scripts:/app/scripts
+      - waf_logs:/app/logs:ro
     depends_on:
       - socket-proxy
       - worker
@@ -62,7 +70,10 @@ services:
     environment:
       DOCKER_HOST: tcp://socket-proxy:2375
       WORKER_CONTAINER: ai-worker
-      TRANSPORT_MODE: sse
+      MCP_TRANSPORT: sse
+      MCP_HOST: 0.0.0.0
+    volumes:
+      - ./mcp_server:/app
     depends_on:
       - socket-proxy
     networks:
@@ -138,6 +149,19 @@ services:
     networks:
       - sandbox_net
 
+  target-waf:
+    image: owasp/modsecurity-crs:nginx-alpine
+    container_name: target-waf
+    restart: unless-stopped
+    environment:
+      BACKEND: http://target-dvwa:80
+      MODSEC_AUDIT_LOG: /var/log/modsec_audit.log
+      MODSEC_AUDIT_LOG_TYPE: Serial
+    volumes:
+      - waf_logs:/var/log
+    networks:
+      - sandbox_net
+
 networks:
   control_net:
     driver: bridge
@@ -148,3 +172,4 @@ networks:
 volumes:
   pgdata:
   neo4j_data:
+  waf_logs:
